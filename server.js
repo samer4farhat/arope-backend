@@ -208,16 +208,66 @@ app.delete('/employee/:id', async (req, res) => {
 });
 
 
+// app.post('/login', async (req, res) => {
+//     const { email, password, isInitialLogin } = req.body;
+
+//     const query = `
+//         SELECT e.*, d.manager_id AS department_manager_id 
+//         FROM employee e 
+//         LEFT JOIN department d ON e.department_id = d.id 
+//         WHERE e.email = ?
+//     `;
+//     db.query(query, [email], async (err, result) => {
+//         if (err) {
+//             res.status(500).send(err);
+//         } else if (result.length === 0) {
+//             res.status(401).send({ message: 'Invalid email' });
+//         } else {
+//             const user = result[0];
+
+//             const isManager = user.manager_id === null || user.department_manager_id === user.id;
+
+//             if (isInitialLogin) {
+//                 const hashedPassword = await bcrypt.hash(password, bcrypt.genSaltSync(12));
+//                 db.query('UPDATE employee SET password = ? WHERE id = ?', [hashedPassword, user.id], (err, result) => {
+//                     if (err) res.send(err);
+//                 });
+//                 const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
+//                 res.send({ 
+//                     message: 'Login successful', 
+//                     token, 
+//                     firstName: user.first_name, 
+//                     lastName: user.last_name, 
+//                     department: user.department_id,
+//                     isHr: user.department_id == 4,
+//                     isManager: isManager 
+//                 });
+//             } else {
+//                 const isMatch = await bcrypt.compare(password, user.password);
+//                 if (isMatch) {
+//                     const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
+//                     res.send({ 
+//                         message: 'Login successful', 
+//                         token, 
+//                         firstName: user.first_name, 
+//                         lastName: user.last_name, 
+//                         department: user.department_id,
+//                         isHr: user.department_id == 4,
+//                         isManager: isManager 
+//                     });
+//                 } else {
+//                     res.status(401).send({ message: 'Invalid email or password' });
+//                 }
+//             }
+//         }
+//     });
+// });
+
 app.post('/login', async (req, res) => {
     const { email, password, isInitialLogin } = req.body;
 
-    const query = `
-        SELECT e.*, d.manager_id AS department_manager_id 
-        FROM employee e 
-        LEFT JOIN department d ON e.department_id = d.id 
-        WHERE e.email = ?
-    `;
-    db.query(query, [email], async (err, result) => {
+    const userQuery = `SELECT * FROM employee WHERE email = ?`;
+    db.query(userQuery, [email], async (err, result) => {
         if (err) {
             res.status(500).send(err);
         } else if (result.length === 0) {
@@ -225,43 +275,56 @@ app.post('/login', async (req, res) => {
         } else {
             const user = result[0];
 
-            const isManager = user.manager_id === null || user.department_manager_id === user.id;
-
-            if (isInitialLogin) {
-                const hashedPassword = await bcrypt.hash(password, bcrypt.genSaltSync(12));
-                db.query('UPDATE employee SET password = ? WHERE id = ?', [hashedPassword, user.id], (err, result) => {
-                    if (err) res.send(err);
-                });
-                const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
-                res.send({ 
-                    message: 'Login successful', 
-                    token, 
-                    firstName: user.first_name, 
-                    lastName: user.last_name, 
-                    department: user.department_id,
-                    isHr: user.department_id == 4,
-                    isManager: isManager 
-                });
-            } else {
-                const isMatch = await bcrypt.compare(password, user.password);
-                if (isMatch) {
-                    const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
-                    res.send({ 
-                        message: 'Login successful', 
-                        token, 
-                        firstName: user.first_name, 
-                        lastName: user.last_name, 
-                        department: user.department_id,
-                        isHr: user.department_id == 4,
-                        isManager: isManager 
-                    });
+            const isManagerQuery = `
+                SELECT COUNT(*) AS is_manager FROM employee WHERE manager_id = ?
+            `;
+            db.query(isManagerQuery, [user.id], (err, managerResult) => {
+                if (err) {
+                    res.status(500).send(err);
                 } else {
-                    res.status(401).send({ message: 'Invalid email or password' });
+                    const isManager = managerResult[0].is_manager > 0 || user.manager_id === null;
+
+                    if (isInitialLogin) {
+                        bcrypt.hash(password, bcrypt.genSaltSync(12), (err, hashedPassword) => {
+                            if (err) res.send(err);
+                            db.query('UPDATE employee SET password = ? WHERE id = ?', [hashedPassword, user.id], (err, result) => {
+                                if (err) res.send(err);
+                                const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
+                                res.send({ 
+                                    message: 'Login successful', 
+                                    token, 
+                                    firstName: user.first_name, 
+                                    lastName: user.last_name, 
+                                    department: user.department_id,
+                                    isHr: user.department_id == 4,
+                                    isManager: isManager 
+                                });
+                            });
+                        });
+                    } else {
+                        bcrypt.compare(password, user.password, (err, isMatch) => {
+                            if (isMatch) {
+                                const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
+                                res.send({ 
+                                    message: 'Login successful', 
+                                    token, 
+                                    firstName: user.first_name, 
+                                    lastName: user.last_name, 
+                                    department: user.department_id,
+                                    isHr: user.department_id == 4,
+                                    isManager: isManager 
+                                });
+                            } else {
+                                res.status(401).send({ message: 'Invalid email or password' });
+                            }
+                        });
+                    }
                 }
-            }
+            });
         }
     });
 });
+
 
 app.get('/departments', (req, res) => {
     var query = `
@@ -380,81 +443,6 @@ app.get('/manager/:departmentId', authenticateToken, async (req, res) => {
 //             const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
 //             const requestQuantity = parseFloat(quantity);
 //             const totalRequested = totalDaysWithoutNote + requestQuantity;
-            
-//             console.log("Total days without note:", totalDaysWithoutNote);
-//             console.log("Requested quantity:", requestQuantity);
-//             console.log("Total requested days:", totalRequested);
-            
-//             if (totalRequested > 2) {
-//                 return res.status(400).send({ message: 'You cannot request more than 2 sick leave days without a note.' });
-//             }
-
-//             insertLeaveRequest();
-//         });
-//     } else {
-//         insertLeaveRequest();
-//     }
-
-//     function insertLeaveRequest() {
-//         const query = `
-//             INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
-//             VALUES (?, ?, ?, ?, ?, ?, NOW())
-//         `;
-
-//         const startDate = leaveDetails[0].date;
-//         const endDate = leaveDetails[leaveDetails.length - 1].date;
-
-//         db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
-//             if (err) {
-//                 console.error('Error adding leave request:', err);
-//                 return res.status(500).send(err);
-//             } 
-
-//             const leaveRequestId = result.insertId;
-//             const dateQueries = leaveDetails.map(detail => (
-//                 new Promise((resolve, reject) => {
-//                     const dateQuery = `
-//                         INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, time)
-//                         VALUES (?, ?, ?, ?)
-//                     `;
-//                     db.query(dateQuery, [leaveRequestId, detail.date, detail.duration, detail.time], (err, dateResult) => {
-//                         if (err) reject(err);
-//                         else resolve(dateResult);
-//                     });
-//                 })
-//             ));
-
-//             Promise.all(dateQueries)
-//                 .then(() => {
-//                     res.send({ message: 'Leave request added successfully' });
-//                 })
-//                 .catch(err => {
-//                     console.error('Error adding leave request dates:', err);
-//                     res.status(500).send(err);
-//                 });
-//         });
-//     }
-// });
-// app.post('/leave-requests', authenticateToken, (req, res) => {
-//     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
-//     console.log('Received leave request:', req.body);
-
-//     if (typeOfLeave === 'Sick Leave Without Note') {
-//         const checkSickLeaveQuery = `
-//             SELECT SUM(quantity) as total
-//             FROM leave_requests
-//             WHERE employee_id = ? AND type_of_leave = 'Sick Leave Without Note' AND request_status != 'Cancelled'
-//         `;
-
-//         db.query(checkSickLeaveQuery, [employeeId], (err, results) => {
-//             if (err) {
-//                 console.error('Database query error:', err);
-//                 return res.status(500).send(err);
-//             }
-
-//             const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
-//             const requestQuantity = parseFloat(quantity);
-//             const totalRequested = totalDaysWithoutNote + requestQuantity;
 
 //             console.log("Total days without note:", totalDaysWithoutNote);
 //             console.log("Requested quantity:", requestQuantity);
@@ -512,85 +500,254 @@ app.get('/manager/:departmentId', authenticateToken, async (req, res) => {
 // });
 
 
+// app.post('/leave-requests', authenticateToken, (req, res) => {
+//     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
+//     console.log('Received leave request:', req.body);
+
+//     if (typeOfLeave === 'Sick Leave Without Note') {
+//         const checkSickLeaveQuery = `
+//             SELECT SUM(quantity) as total
+//             FROM leave_requests
+//             WHERE employee_id = ? AND type_of_leave = 'Sick Leave Without Note' AND request_status != 'Cancelled'
+//         `;
+
+//         db.query(checkSickLeaveQuery, [employeeId], (err, results) => {
+//             if (err) {
+//                 console.error('Database query error:', err);
+//                 return res.status(500).send(err);
+//             }
+
+//             const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
+//             const requestQuantity = parseFloat(quantity);
+//             const totalRequested = totalDaysWithoutNote + requestQuantity;
+
+//             console.log("Total days without note:", totalDaysWithoutNote);
+//             console.log("Requested quantity:", requestQuantity);
+//             console.log("Total requested days:", totalRequested);
+
+//             if (totalRequested > 2) {
+//                 return res.status(400).send({ message: 'You cannot request more than 2 sick leave days without a note.' });
+//             }
+
+//             insertLeaveRequest();
+//         });
+//     } else {
+//         insertLeaveRequest();
+//     }
+
+//     function insertLeaveRequest() {
+//         const query = `
+//             INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
+//             VALUES (?, ?, ?, ?, ?, ?, NOW())
+//         `;
+
+//         const startDate = leaveDetails[0].date;
+//         const endDate = leaveDetails[leaveDetails.length - 1].date;
+
+//         db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
+//             if (err) {
+//                 console.error('Error adding leave request:', err);
+//                 return res.status(500).send(err);
+//             }
+
+//             const leaveRequestId = result.insertId;
+//             const dateQueries = leaveDetails.map(detail => (
+//                 new Promise((resolve, reject) => {
+//                     const dateQuery = `
+//                         INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, start_time, end_time, time)
+//                         VALUES (?, ?, ?, ?, ?, ?)
+//                     `;
+//                     const time = detail.duration === '0.5' ? detail.time : null;
+//                     db.query(dateQuery, [leaveRequestId, detail.date, detail.duration || null, detail.start_time, detail.end_time, time], (err, dateResult) => {
+//                         if (err) reject(err);
+//                         else resolve(dateResult);
+//                     });
+//                 })
+//             ));
+
+//             Promise.all(dateQueries)
+//                 .then(() => {
+//                     res.send({ message: 'Leave request added successfully' });
+//                 })
+//                 .catch(err => {
+//                     console.error('Error adding leave request dates:', err);
+//                     res.status(500).send(err);
+//                 });
+//         });
+//     }
+// });
+
+
 app.post('/leave-requests', authenticateToken, (req, res) => {
     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
     console.log('Received leave request:', req.body);
 
-    if (typeOfLeave === 'Sick Leave Without Note') {
-        const checkSickLeaveQuery = `
-            SELECT SUM(quantity) as total
-            FROM leave_requests
-            WHERE employee_id = ? AND type_of_leave = 'Sick Leave Without Note' AND request_status != 'Cancelled'
-        `;
+    // Fetch holidays
+    const holidayQuery = `
+        SELECT start_date, end_date
+        FROM holidays
+    `;
 
-        db.query(checkSickLeaveQuery, [employeeId], (err, results) => {
-            if (err) {
-                console.error('Database query error:', err);
-                return res.status(500).send(err);
-            }
+    db.query(holidayQuery, (err, holidays) => {
+        if (err) {
+            console.error('Error fetching holidays:', err);
+            return res.status(500).send(err);
+        }
 
-            const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
-            const requestQuantity = parseFloat(quantity);
-            const totalRequested = totalDaysWithoutNote + requestQuantity;
+        // Check if any leaveDetails fall within the holidays
+        const leaveDates = leaveDetails.map(detail => detail.date);
+        const isHoliday = holidays.some(holiday => {
+            const startDate = moment(holiday.start_date);
+            const endDate = moment(holiday.end_date);
+            return leaveDates.some(date => moment(date).isBetween(startDate, endDate, 'days', '[]'));
+        });
 
-            console.log("Total days without note:", totalDaysWithoutNote);
-            console.log("Requested quantity:", requestQuantity);
-            console.log("Total requested days:", totalRequested);
+        if (isHoliday) {
+            return res.status(400).send({ message: 'Leave request cannot be made on holidays' });
+        }
 
-            if (totalRequested > 2) {
-                return res.status(400).send({ message: 'You cannot request more than 2 sick leave days without a note.' });
-            }
+        // Existing leave request logic
+        if (typeOfLeave === 'Sick Leave Without Note') {
+            const checkSickLeaveQuery = `
+                SELECT SUM(quantity) as total
+                FROM leave_requests
+                WHERE employee_id = ? AND type_of_leave = 'Sick Leave Without Note' AND request_status != 'Cancelled'
+            `;
 
+            db.query(checkSickLeaveQuery, [employeeId], (err, results) => {
+                if (err) {
+                    console.error('Database query error:', err);
+                    return res.status(500).send(err);
+                }
+
+                const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
+                const requestQuantity = parseFloat(quantity);
+                const totalRequested = totalDaysWithoutNote + requestQuantity;
+
+                console.log("Total days without note:", totalDaysWithoutNote);
+                console.log("Requested quantity:", requestQuantity);
+                console.log("Total requested days:", totalRequested);
+
+                if (totalRequested > 2) {
+                    return res.status(400).send({ message: 'You cannot request more than 2 sick leave days without a note.' });
+                }
+
+                insertLeaveRequest();
+            });
+        } else if (typeOfLeave === 'Unpaid Leave') {
+            const checkUnpaidLeaveQuery = `
+                SELECT SUM(quantity) as total
+                FROM leave_requests
+                WHERE employee_id = ? AND type_of_leave = 'Unpaid Leave' AND request_status != 'Cancelled'
+            `;
+
+            db.query(checkUnpaidLeaveQuery, [employeeId], (err, results) => {
+                if (err) {
+                    console.error('Database query error:', err);
+                    return res.status(500).send(err);
+                }
+
+                const totalUnpaidLeaveDays = parseFloat(results[0].total) || 0;
+                const requestQuantity = parseFloat(quantity);
+                const totalRequested = totalUnpaidLeaveDays + requestQuantity;
+
+                console.log("Total unpaid leave days:", totalUnpaidLeaveDays);
+                console.log("Requested quantity:", requestQuantity);
+                console.log("Total requested days:", totalRequested);
+
+                if (totalRequested > 5) {
+                    return res.status(400).send({ message: 'You cannot request more than 5 unpaid leave days.' });
+                }
+
+                insertLeaveRequest();
+            });
+        } else {
             insertLeaveRequest();
-        });
-    } else {
-        insertLeaveRequest();
-    }
+        }
 
-    function insertLeaveRequest() {
-        const query = `
-            INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
-            VALUES (?, ?, ?, ?, ?, ?, NOW())
-        `;
+        function insertLeaveRequest() {
+            const query = `
+                INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
+                VALUES (?, ?, ?, ?, ?, ?, NOW())
+            `;
 
-        const startDate = leaveDetails[0].date;
-        const endDate = leaveDetails[leaveDetails.length - 1].date;
+            const startDate = leaveDetails[0].date;
+            const endDate = leaveDetails[leaveDetails.length - 1].date;
 
-        db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
-            if (err) {
-                console.error('Error adding leave request:', err);
-                return res.status(500).send(err);
-            }
+            db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
+                if (err) {
+                    console.error('Error adding leave request:', err);
+                    return res.status(500).send(err);
+                }
 
-            const leaveRequestId = result.insertId;
-            const dateQueries = leaveDetails.map(detail => (
-                new Promise((resolve, reject) => {
-                    const dateQuery = `
-                        INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, start_time, end_time, time)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    `;
-                    const time = detail.duration === '0.5' ? detail.time : null;
-                    db.query(dateQuery, [leaveRequestId, detail.date, detail.duration || null, detail.start_time, detail.end_time, time], (err, dateResult) => {
-                        if (err) reject(err);
-                        else resolve(dateResult);
+                const leaveRequestId = result.insertId;
+                const dateQueries = leaveDetails.map(detail => (
+                    new Promise((resolve, reject) => {
+                        const dateQuery = `
+                            INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, start_time, end_time, time)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        `;
+                        const time = detail.duration === '0.5' ? detail.time : null;
+                        db.query(dateQuery, [leaveRequestId, detail.date, detail.duration || null, detail.start_time, detail.end_time, time], (err, dateResult) => {
+                            if (err) reject(err);
+                            else resolve(dateResult);
+                        });
+                    })
+                ));
+
+                Promise.all(dateQueries)
+                    .then(() => {
+                        res.send({ message: 'Leave request added successfully' });
+                    })
+                    .catch(err => {
+                        console.error('Error adding leave request dates:', err);
+                        res.status(500).send(err);
                     });
-                })
-            ));
+            });
+        }
+    });
+});
 
-            Promise.all(dateQueries)
-                .then(() => {
-                    res.send({ message: 'Leave request added successfully' });
-                })
-                .catch(err => {
-                    console.error('Error adding leave request dates:', err);
-                    res.status(500).send(err);
-                });
-        });
-    }
+app.get('/previous-unpaid-leave-days/:employeeId', authenticateToken, (req, res) => {
+    const employeeId = req.params.employeeId;
+
+    const query = `
+        SELECT SUM(quantity) as total
+        FROM leave_requests
+        WHERE employee_id = ? AND type_of_leave = 'Unpaid Leave' AND request_status != 'Cancelled'
+    `;
+
+    db.query(query, [employeeId], (err, results) => {
+        if (err) {
+            console.error('Database query error:', err);
+            return res.status(500).send(err);
+        }
+        const totalUnpaidLeaveDays = results[0].total || 0;
+        res.send({ total: totalUnpaidLeaveDays });
+    });
 });
 
 
 
+app.patch('/holidays/:id', hrAuthenticateToken, (req, res) => {
+    const id = req.params.id;
+    const { startDate, endDate, description } = req.body;
+
+    const query = `
+        UPDATE holidays
+        SET start_date = ?, end_date = ?, description = ?
+        WHERE id = ?
+    `;
+
+    db.query(query, [startDate, endDate, description, id], (err, result) => {
+        if (err) {
+            console.error('Error updating holiday:', err);
+            res.status(500).send(err);
+        } else {
+            res.send({ message: 'Holiday updated successfully' });
+        }
+    });
+});
 
 
 
@@ -1091,6 +1248,21 @@ app.patch('/leave-requests/:id/reject', authenticateToken, (req, res) => {
     });
 });
 
+app.get('/holidays', (req, res) => {
+    const query = `
+        SELECT start_date, end_date, description
+        FROM holidays
+    `;
+    db.query(query, (err, result) => {
+        if (err) {
+            console.error('Error fetching holidays:', err);
+            res.status(500).send(err);
+        } else {
+            res.send(result);
+        }
+    });
+});
+
 
 app.get('/unavailable-dates/:id', authenticateToken, (req, res) => {
     const id = req.params.id;
@@ -1116,8 +1288,10 @@ app.get('/unavailable-dates/:id', authenticateToken, (req, res) => {
     `;
 
     db.query(query, [id], (err, results) => {
-        if (err) res.send(err);
-        else {
+        if (err) {
+            console.error('Error fetching unavailable dates:', err);
+            res.send(err);
+        } else {
             res.send(results);
         } 
     });
@@ -1456,3 +1630,4 @@ app.get('/remaining-timeoff/:employeeId', authenticateToken, (req, res) => {
         res.send({ remainingMinutes });
     });
 });
+
