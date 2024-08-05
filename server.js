@@ -522,11 +522,14 @@ app.get('/previous-unpaid-leave-days/:employeeId', authenticateToken, (req, res)
 app.patch('/holidays/:id', hrAuthenticateToken, (req, res) => {
     const id = req.params.id;
     const { startDate, endDate, description } = req.body;
+    const hrUserId = getIdFromToken(req); // Get HR user ID from token
+    const formattedStartDate = moment(startDate).format('YYYY-MM-DD');
+    const formattedEndDate = moment(endDate).format('YYYY-MM-DD');
 
     const query = `
         UPDATE holidays
         SET start_date = ?, end_date = ?, description = ?
-        WHERE id = ?
+        WHERE description = ?
     `;
 
     db.query(query, [startDate, endDate, description, id], (err, result) => {
@@ -534,42 +537,53 @@ app.patch('/holidays/:id', hrAuthenticateToken, (req, res) => {
             console.error('Error updating holiday:', err);
             res.status(500).send(err);
         } else {
+            addLog(hrUserId, 'Edit Holiday', `Edited holiday ${id}: ${formattedStartDate} to ${formattedEndDate}, description: ${description}`);
             res.send({ message: 'Holiday updated successfully' });
         }
     });
 });
 
+const addLog = (hrUserId, action, details) => {
+    const getUserInfoQuery = 'SELECT first_name, last_name FROM employee WHERE id = ?';
+    db.query(getUserInfoQuery, [hrUserId], (err, results) => {
+        if (err) {
+            console.error('Error fetching HR user info:', err);
+            return;
+        }
+        
+        if (results.length > 0) {
+            const hrUser = results[0];
+            const hrUserName = `${hrUser.first_name} ${hrUser.last_name}`;
 
-
-
-
-
-
-
-
-const addLog = (hrUser, action, details) => {
-    const query = `
-        INSERT INTO Logs (hr_user, action, details)
-        VALUES (?, ?, ?)
-    `;
-    db.query(query, [hrUser, action, details], (err, result) => {
-        if (err) console.error('Error logging action:', err);
+            const insertLogQuery = `
+                INSERT INTO logs (hr_user, hr_user_name, action, details)
+                VALUES (?, ?, ?, ?)
+            `;
+            
+            db.query(insertLogQuery, [hrUserId, hrUserName, action, details], (err, result) => {
+                if (err) console.error('Error logging action:', err);
+            });
+        } else {
+            console.log('HR user not found');
+        }
     });
 };
 
+
+
+
 app.get('/logs', (req, res) => {
     const query = `
-        SELECT l.id, e.first_name as "hr_user_first_name", e.last_name as "hr_user_last_name", l.action, l.details, l.timestamp
-        FROM Logs l
-        INNER JOIN employee e
-        ON l.hr_user = e.id
-        ORDER BY timestamp DESC
+        SELECT l.id, l.hr_user_name as "hr_user_name", l.action, l.details, l.timestamp
+        FROM logs l
+        ORDER BY l.timestamp DESC
     `;
     db.query(query, (err, result) => {
         if (err) res.send(err);
         else res.send(result);
     });
 });
+
 
 app.get('/manager-leave-requests', authenticateToken, (req, res) => {
     const userId = req.user.id;
@@ -610,6 +624,7 @@ app.get('/manager-leave-requests', authenticateToken, (req, res) => {
 
 app.post('/leave-requests/hr', authenticateToken, (req, res) => {
     const { employeeId, action, reason, leaveDetails } = req.body;
+    const hrUserId = getIdFromToken(req); // Get HR user ID from token
 
     let totalAmount = 0;
     leaveDetails.forEach(detail => {
@@ -623,16 +638,31 @@ app.post('/leave-requests/hr', authenticateToken, (req, res) => {
     const startDate = leaveDetails[0].date;
     const endDate = leaveDetails[leaveDetails.length - 1].date;
 
-    const query = `
-        INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
-        VALUES (?, ?, ?, ?, ?, ?, NOW())
-    `;
+    const employeeQuery = `SELECT first_name, last_name FROM employee WHERE id = ?`;
 
-    db.query(query, [employeeId, typeOfLeave, requestStatus, totalAmount, startDate, endDate], (err, result) => {
+    db.query(employeeQuery, [employeeId], (err, employeeResult) => {
         if (err) {
-            console.error('Error adding leave request:', err);
-            res.status(500).send(err);
-        } else {
+            console.error('Error fetching employee details:', err);
+            return res.status(500).send(err);
+        }
+
+        if (employeeResult.length === 0) {
+            return res.status(404).send({ message: 'Employee not found' });
+        }
+
+        const employeeName = `${employeeResult[0].first_name} ${employeeResult[0].last_name}`;
+
+        const query = `
+            INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
+            VALUES (?, ?, ?, ?, ?, ?, NOW())
+        `;
+
+        db.query(query, [employeeId, typeOfLeave, requestStatus, totalAmount, startDate, endDate], (err, result) => {
+            if (err) {
+                console.error('Error adding leave request:', err);
+                return res.status(500).send(err);
+            }
+
             const leaveRequestId = result.insertId;
             const dateQueries = leaveDetails.map(detail => (
                 new Promise((resolve, reject) => {
@@ -656,8 +686,10 @@ app.post('/leave-requests/hr', authenticateToken, (req, res) => {
                     db.query(updateDaysQuery, [totalAmount, employeeId], (err, updateResult) => {
                         if (err) {
                             console.error('Error updating employee days:', err);
-                            res.status(500).send(err);
+                            return res.status(500).send(err);
                         } else {
+                            const logAction = action === 'Add' ? 'Add Days' : 'Remove Days';
+                            addLog(hrUserId, logAction, `${logAction} for employee: ${employeeName}, Amount: ${totalAmount}`);
                             res.send({ message: 'Leave request added successfully and days updated' });
                         }
                     });
@@ -666,9 +698,11 @@ app.post('/leave-requests/hr', authenticateToken, (req, res) => {
                     console.error('Error adding leave request dates:', err);
                     res.status(500).send(err);
                 });
-        }
+        });
     });
 });
+
+
 
 app.get('/leave-requests/:id', authenticateToken, (req, res) => {
     const id = req.params.id;
@@ -1177,9 +1211,9 @@ function addBirthdayLeave() {
 cron.schedule('0 0 * * *', () => {
     addBirthdayLeave();
 });
-
 app.post('/holiday', hrAuthenticateToken, async (req, res) => {
     const { startDate, endDate, description } = req.body;
+    const hrUserId = getIdFromToken(req); // Get HR user ID from token
     const formattedStartDate = moment(startDate).format('YYYY-MM-DD');
     const formattedEndDate = moment(endDate).format('YYYY-MM-DD');
 
@@ -1192,6 +1226,8 @@ app.post('/holiday', hrAuthenticateToken, async (req, res) => {
             console.error('Error inserting holiday:', err);
             return res.status(500).send(err);
         }
+        
+        addLog(hrUserId, 'Add Holiday', `Added holiday from ${formattedStartDate} to ${formattedEndDate} with description: ${description}`);
 
         const findLeaveRequestsQuery = `
             SELECT lr.id, lr.employee_id, lr.type_of_leave, lr.quantity, lrd.duration, lrd.leave_date, lr.request_status
@@ -1201,13 +1237,12 @@ app.post('/holiday', hrAuthenticateToken, async (req, res) => {
             AND lr.request_status IN ('Approved', 'Pending Manager')
         `;
 
-        db.query(findLeaveRequestsQuery, [formattedStartDate, formattedEndDate], (err, result) => {
+        db.query(findLeaveRequestsQuery, [formattedStartDate, formattedEndDate], (err, leaveRequests) => {
             if (err) {
                 console.error('Error finding leave requests:', err);
                 return res.status(500).send(err);
             }
 
-            const leaveRequests = result;
             const updateRequests = leaveRequests.map(request => {
                 return new Promise((resolve, reject) => {
                     db.query(`UPDATE leave_requests SET request_status = 'Cancelled' WHERE id = ?`, [request.id], (err, result) => {
@@ -1244,6 +1279,7 @@ app.post('/holiday', hrAuthenticateToken, async (req, res) => {
         });
     });
 });
+
 
 
 
