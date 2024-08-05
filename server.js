@@ -207,62 +207,6 @@ app.delete('/employee/:id', async (req, res) => {
     });
 });
 
-
-// app.post('/login', async (req, res) => {
-//     const { email, password, isInitialLogin } = req.body;
-
-//     const query = `
-//         SELECT e.*, d.manager_id AS department_manager_id 
-//         FROM employee e 
-//         LEFT JOIN department d ON e.department_id = d.id 
-//         WHERE e.email = ?
-//     `;
-//     db.query(query, [email], async (err, result) => {
-//         if (err) {
-//             res.status(500).send(err);
-//         } else if (result.length === 0) {
-//             res.status(401).send({ message: 'Invalid email' });
-//         } else {
-//             const user = result[0];
-
-//             const isManager = user.manager_id === null || user.department_manager_id === user.id;
-
-//             if (isInitialLogin) {
-//                 const hashedPassword = await bcrypt.hash(password, bcrypt.genSaltSync(12));
-//                 db.query('UPDATE employee SET password = ? WHERE id = ?', [hashedPassword, user.id], (err, result) => {
-//                     if (err) res.send(err);
-//                 });
-//                 const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
-//                 res.send({ 
-//                     message: 'Login successful', 
-//                     token, 
-//                     firstName: user.first_name, 
-//                     lastName: user.last_name, 
-//                     department: user.department_id,
-//                     isHr: user.department_id == 4,
-//                     isManager: isManager 
-//                 });
-//             } else {
-//                 const isMatch = await bcrypt.compare(password, user.password);
-//                 if (isMatch) {
-//                     const token = jwt.sign({ id: user.id, is_hr: user.department_id == 4, is_manager: isManager }, jwt_secret, { expiresIn: '1h' });
-//                     res.send({ 
-//                         message: 'Login successful', 
-//                         token, 
-//                         firstName: user.first_name, 
-//                         lastName: user.last_name, 
-//                         department: user.department_id,
-//                         isHr: user.department_id == 4,
-//                         isManager: isManager 
-//                     });
-//                 } else {
-//                     res.status(401).send({ message: 'Invalid email or password' });
-//                 }
-//             }
-//         }
-//     });
-// });
-
 app.post('/login', async (req, res) => {
     const { email, password, isInitialLogin } = req.body;
 
@@ -336,15 +280,16 @@ app.get('/departments', (req, res) => {
         else res.send(result);
 })});
 
+
 app.post('/departments', hrAuthenticateToken, async (req, res) => {
-    const { name } = req.body;
+    const { name, manager_id } = req.body;
     const hrUserId = getIdFromToken(req); // Get HR user ID from token
 
     const query = `
-        INSERT INTO department (name)
-        VALUES (?);
+        INSERT INTO department (name, manager_id)
+        VALUES (?, ?);
     `;
-    db.query(query, [name], (err, result) => {
+    db.query(query, [name, manager_id], (err, result) => {
         if (err) {
             res.send(err);
         } else {
@@ -353,14 +298,13 @@ app.post('/departments', hrAuthenticateToken, async (req, res) => {
                 if (err) {
                     res.send(err);
                 } else {
-                    addLog(hrUserId, 'Add Department', `Added department: ${name}`);
+                    addLog(hrUserId, 'Add Department', `Added department: ${name} with manager ID: ${manager_id}`);
                     res.send(newDeptResult[0]);
                 }
             });
         }
     });
 });
-
 app.patch('/departments/:id', hrAuthenticateToken, (req, res) => {
     const id = req.params.id;
     const hrUserId = getIdFromToken(req); // Get HR user ID from token
@@ -372,20 +316,21 @@ app.patch('/departments/:id', hrAuthenticateToken, (req, res) => {
             const originalDepartment = result[0];
             const query = `
                 UPDATE department
-                SET name = ?
+                SET name = ?, manager_id = ?
                 WHERE id = ?;
             `;
-            db.query(query, [req.body.name, id], (err, result) => {
+            db.query(query, [req.body.name, req.body.manager_id, id], (err, result) => {
                 if (err) {
                     res.send(err);
                 } else {
-                    addLog(hrUserId, 'Edit Department', `Edited department: ${originalDepartment.name} -> ${req.body.name}`);
+                    addLog(hrUserId, 'Edit Department', `Edited department: ${originalDepartment.name} -> ${req.body.name}, manager ID: ${req.body.manager_id}`);
                     res.send(result);
                 }
             });
         }
     });
 });
+
 
 app.get('/managers/:department', (req, res) => {
     const token = req.headers['authorization'];
@@ -422,161 +367,6 @@ app.get('/manager/:departmentId', authenticateToken, async (req, res) => {
         res.status(500).json({ message: 'Internal Server Error', error: error.message });  // Return detailed error
     }
 });
-
-// app.post('/leave-requests', authenticateToken, (req, res) => {
-//     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
-//     console.log('Received leave request:', req.body);
-
-//     if (typeOfLeave === 'Sick Leave Without Note') {
-//         const checkSickLeaveQuery = `
-//             SELECT SUM(quantity) as total
-//             FROM leave_requests
-//             WHERE employee_id = ? AND type_of_leave = 'Sick Leave Without Note' AND request_status != 'Cancelled'
-//         `;
-
-//         db.query(checkSickLeaveQuery, [employeeId], (err, results) => {
-//             if (err) {
-//                 console.error('Database query error:', err);
-//                 return res.status(500).send(err);
-//             }
-
-//             const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
-//             const requestQuantity = parseFloat(quantity);
-//             const totalRequested = totalDaysWithoutNote + requestQuantity;
-
-//             console.log("Total days without note:", totalDaysWithoutNote);
-//             console.log("Requested quantity:", requestQuantity);
-//             console.log("Total requested days:", totalRequested);
-
-//             if (totalRequested > 2) {
-//                 return res.status(400).send({ message: 'You cannot request more than 2 sick leave days without a note.' });
-//             }
-
-//             insertLeaveRequest();
-//         });
-//     } else {
-//         insertLeaveRequest();
-//     }
-
-//     function insertLeaveRequest() {
-//         const query = `
-//             INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
-//             VALUES (?, ?, ?, ?, ?, ?, NOW())
-//         `;
-
-//         const startDate = leaveDetails[0].date;
-//         const endDate = leaveDetails[leaveDetails.length - 1].date;
-
-//         db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
-//             if (err) {
-//                 console.error('Error adding leave request:', err);
-//                 return res.status(500).send(err);
-//             }
-
-//             const leaveRequestId = result.insertId;
-//             const dateQueries = leaveDetails.map(detail => (
-//                 new Promise((resolve, reject) => {
-//                     const dateQuery = `
-//                         INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, start_time, end_time)
-//                         VALUES (?, ?, ?, ?, ?)
-//                     `;
-//                     db.query(dateQuery, [leaveRequestId, detail.date, detail.duration || null, detail.start_time, detail.end_time], (err, dateResult) => {
-//                         if (err) reject(err);
-//                         else resolve(dateResult);
-//                     });
-//                 })
-//             ));
-
-//             Promise.all(dateQueries)
-//                 .then(() => {
-//                     res.send({ message: 'Leave request added successfully' });
-//                 })
-//                 .catch(err => {
-//                     console.error('Error adding leave request dates:', err);
-//                     res.status(500).send(err);
-//                 });
-//         });
-//     }
-// });
-
-
-// app.post('/leave-requests', authenticateToken, (req, res) => {
-//     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
-//     console.log('Received leave request:', req.body);
-
-//     if (typeOfLeave === 'Sick Leave Without Note') {
-//         const checkSickLeaveQuery = `
-//             SELECT SUM(quantity) as total
-//             FROM leave_requests
-//             WHERE employee_id = ? AND type_of_leave = 'Sick Leave Without Note' AND request_status != 'Cancelled'
-//         `;
-
-//         db.query(checkSickLeaveQuery, [employeeId], (err, results) => {
-//             if (err) {
-//                 console.error('Database query error:', err);
-//                 return res.status(500).send(err);
-//             }
-
-//             const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
-//             const requestQuantity = parseFloat(quantity);
-//             const totalRequested = totalDaysWithoutNote + requestQuantity;
-
-//             console.log("Total days without note:", totalDaysWithoutNote);
-//             console.log("Requested quantity:", requestQuantity);
-//             console.log("Total requested days:", totalRequested);
-
-//             if (totalRequested > 2) {
-//                 return res.status(400).send({ message: 'You cannot request more than 2 sick leave days without a note.' });
-//             }
-
-//             insertLeaveRequest();
-//         });
-//     } else {
-//         insertLeaveRequest();
-//     }
-
-//     function insertLeaveRequest() {
-//         const query = `
-//             INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
-//             VALUES (?, ?, ?, ?, ?, ?, NOW())
-//         `;
-
-//         const startDate = leaveDetails[0].date;
-//         const endDate = leaveDetails[leaveDetails.length - 1].date;
-
-//         db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
-//             if (err) {
-//                 console.error('Error adding leave request:', err);
-//                 return res.status(500).send(err);
-//             }
-
-//             const leaveRequestId = result.insertId;
-//             const dateQueries = leaveDetails.map(detail => (
-//                 new Promise((resolve, reject) => {
-//                     const dateQuery = `
-//                         INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, start_time, end_time, time)
-//                         VALUES (?, ?, ?, ?, ?, ?)
-//                     `;
-//                     const time = detail.duration === '0.5' ? detail.time : null;
-//                     db.query(dateQuery, [leaveRequestId, detail.date, detail.duration || null, detail.start_time, detail.end_time, time], (err, dateResult) => {
-//                         if (err) reject(err);
-//                         else resolve(dateResult);
-//                     });
-//                 })
-//             ));
-
-//             Promise.all(dateQueries)
-//                 .then(() => {
-//                     res.send({ message: 'Leave request added successfully' });
-//                 })
-//                 .catch(err => {
-//                     console.error('Error adding leave request dates:', err);
-//                     res.status(500).send(err);
-//                 });
-//         });
-//     }
-// });
-
 
 app.post('/leave-requests', authenticateToken, (req, res) => {
     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
@@ -780,65 +570,35 @@ app.get('/logs', (req, res) => {
         else res.send(result);
     });
 });
-// app.get('/manager-leave-requests', authenticateToken, (req, res) => {
-//     const userId = req.user.id;
 
-//     const query = `
-//         SELECT 
-//             lr.id,
-//             lr.employee_id AS employeeId, 
-//             CONCAT(e.first_name, ' ', e.last_name) AS name,
-//             lr.type_of_leave AS typeOfLeave, 
-//             lr.request_status AS requestStatus, 
-//             SUM(ld.duration) AS quantity,
-//             GROUP_CONCAT(ld.leave_date) AS dates,
-//             lr.last_modified AS lastModified 
-//         FROM leave_requests lr
-//         JOIN employee e ON lr.employee_id = e.id
-//         LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-//         WHERE e.manager_id = ? OR e.id IN (
-//             SELECT id FROM employee WHERE department_id = (
-//                 SELECT department_id FROM employee WHERE id = ?
-//             )
-//         )
-//         GROUP BY lr.id
-//         ORDER BY lastModified DESC
-//     `;
-//     db.query(query, [userId, userId], (err, result) => {
-//         if (err) res.send(err);
-//         else res.send(result);
-//     });
-// });
 app.get('/manager-leave-requests', authenticateToken, (req, res) => {
     const userId = req.user.id;
 
     const query = `
-        SELECT 
-            lr.id,
-            lr.employee_id AS employeeId, 
-            CONCAT(e.first_name, ' ', e.last_name) AS name,
-            lr.type_of_leave AS typeOfLeave, 
-            lr.request_status AS requestStatus, 
-            SUM(ld.duration) AS quantity,
-            GROUP_CONCAT(ld.leave_date) AS dates,
-            GROUP_CONCAT(
-                CASE 
-                    WHEN lr.type_of_leave = 'Personal Time Off' THEN CONCAT(DATE_FORMAT(ld.start_time, '%H:%i'), ' >> ',DATE_FORMAT(ld.end_time, '%H:%i'))
-                    WHEN ld.duration = 0.5 THEN ld.time
-                    ELSE ''
-                END
-            ) AS time,
-            lr.last_modified AS lastModified 
-        FROM leave_requests lr
-        JOIN employee e ON lr.employee_id = e.id
-        LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-        WHERE e.manager_id = ? OR e.id IN (
-            SELECT id FROM employee WHERE department_id = (
-                SELECT department_id FROM employee WHERE id = ?
-            )
-        )
-        GROUP BY lr.id
-        ORDER BY lastModified DESC
+                    SELECT 
+                        lr.id,
+                        lr.employee_id AS employeeId, 
+                        CONCAT(e.first_name, ' ', e.last_name) AS name,
+                        lr.type_of_leave AS typeOfLeave, 
+                        lr.request_status AS requestStatus, 
+                        SUM(ld.duration) AS quantity,
+                        GROUP_CONCAT(ld.leave_date) AS dates,
+                        GROUP_CONCAT(
+                            CASE 
+                                WHEN lr.type_of_leave = 'Personal Time Off' THEN CONCAT(DATE_FORMAT(ld.start_time, '%H:%i'), ' >> ', DATE_FORMAT(ld.end_time, '%H:%i'))
+                                WHEN ld.duration = 0.5 THEN ld.time
+                                ELSE ''
+                            END
+                        ) AS time,
+                        lr.last_modified AS lastModified 
+                    FROM leave_requests lr
+                    JOIN employee e ON lr.employee_id = e.id
+                    LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
+                    JOIN department d ON e.department_id = d.id
+                    WHERE d.manager_id = ?
+                    GROUP BY lr.id
+                    ORDER BY lastModified DESC
+
     `;
     db.query(query, [userId, userId], (err, result) => {
         if (err) res.send(err);
@@ -910,44 +670,6 @@ app.post('/leave-requests/hr', authenticateToken, (req, res) => {
     });
 });
 
-
-
-// app.get('/leave-requests/:id', authenticateToken, (req, res) => {
-//     const id = req.params.id;
-
-//     const query = `
-//         SELECT 
-//             lr.id,
-//             lr.employee_id AS employeeId, 
-//             CONCAT(e.first_name, ' ', e.last_name) AS name,
-//             lr.type_of_leave AS typeOfLeave, 
-//             lr.request_status AS requestStatus, 
-//             SUM(ld.duration) AS quantity,
-//             GROUP_CONCAT(ld.leave_date) AS dates,
-//             GROUP_CONCAT(
-//                 CASE 
-//                     WHEN ld.time = 'AM' THEN 'Morning'
-//                     WHEN ld.time = 'PM' THEN 'Afternoon'
-//                     ELSE 'N/A'
-//                 END
-//             ) AS time,
-//             lr.last_modified AS lastModified
-//         FROM leave_requests lr
-//         JOIN employee e ON lr.employee_id = e.id
-//         JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-//         WHERE lr.employee_id = ?
-//         GROUP BY lr.id
-//         ORDER BY lr.last_modified DESC
-//     `;
-
-//     db.query(query, [id], (err, result) => {
-//         if (err) {
-//             console.error('Error fetching leave requests and HR transactions:', err);
-//             return res.status(500).send(err);
-//         }
-//         res.send(result);
-//     });
-// });
 app.get('/leave-requests/:id', authenticateToken, (req, res) => {
     const id = req.params.id;
     console.log('Fetching leave requests for employee:', id);
@@ -987,60 +709,6 @@ app.get('/leave-requests/:id', authenticateToken, (req, res) => {
     });
 });
 
-
-
-
-// app.get('/employee/:id/leave-summary', (req, res) => {
-//     const employeeId = req.params.id;
-
-//     const query = `
-//         SELECT ld.leave_date AS date,
-//                SUM(ld.duration) AS net_amount
-//         FROM leave_requests lr
-//         JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-//         WHERE lr.employee_id = ? 
-//           AND (lr.request_status = 'Approved'
-//           OR lr.request_status = 'HR Remove')
-//         GROUP BY ld.leave_date
-//         HAVING SUM(ld.duration) > 0
-//         ORDER BY ld.leave_date;
-//     `;
-
-//     db.query(query, [employeeId], (err, results) => {
-//         if (err) {
-//             console.error('Database query error:', err);
-//             res.status(500).send(err);
-//         } else {
-//             res.send(results);
-//         }
-//     });
-// });
-// app.get('/employee/:id/leave-summary', (req, res) => {
-//     const employeeId = req.params.id;
-
-//     const query = `
-//         SELECT ld.leave_date AS date,
-//                SUM(ld.duration) AS net_amount,
-//                lr.type_of_leave AS leave_type
-//         FROM leave_requests lr
-//         JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-//         WHERE lr.employee_id = ? 
-//           AND (lr.request_status = 'Approved'
-//           OR lr.request_status = 'HR Remove')
-//         GROUP BY ld.leave_date, lr.type_of_leave
-//         HAVING SUM(ld.duration) > 0
-//         ORDER BY ld.leave_date;
-//     `;
-
-//     db.query(query, [employeeId], (err, results) => {
-//         if (err) {
-//             console.error('Database query error:', err);
-//             res.status(500).send(err);
-//         } else {
-//             res.send(results);
-//         }
-//     });
-// });
 
 app.get('/employee/:id/leave-summary', (req, res) => {
     const employeeId = req.params.id;
@@ -1086,6 +754,7 @@ app.get('/employee/:id/leave-summary', (req, res) => {
         }
     });
 });
+
 
 
 
@@ -1204,14 +873,6 @@ app.get('/previous-sick-leave-days/:employeeId', authenticateToken, (req, res) =
     });
 });
 
-
-
-
-
-
-
-
-
 app.patch('/leave-requests/:id/reject', authenticateToken, (req, res) => {
     const id = req.params.id;
 
@@ -1263,15 +924,15 @@ app.get('/holidays', (req, res) => {
     });
 });
 
-
 app.get('/unavailable-dates/:id', authenticateToken, (req, res) => {
     const id = req.params.id;
     const query = `
-        SELECT 
+SELECT 
             CASE 
-                WHEN main.duration >= '1' THEN 'NONE'
+                WHEN main.duration >= 1 THEN 'NONE'
                 WHEN main.duration = 0.5 AND main.time = 'AM' THEN 'HD-AM'
                 WHEN main.duration = 0.5 AND main.time = 'PM' THEN 'HD-PM'
+                WHEN main.start_time IS NOT NULL AND main.end_time IS NOT NULL AND TIMESTAMPDIFF(MINUTE, main.start_time, main.end_time) > 0 THEN 'PTO'
                 ELSE 'N/A'
             END AS action,
             main.leave_date as date
@@ -1279,7 +940,9 @@ app.get('/unavailable-dates/:id', authenticateToken, (req, res) => {
             SELECT  
                 ld.duration,
                 ld.leave_date,
-                ld.time
+                ld.time,
+                ld.start_time,
+                ld.end_time
             FROM leave_requests lr
             JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
             WHERE lr.employee_id = ?
@@ -1296,6 +959,7 @@ app.get('/unavailable-dates/:id', authenticateToken, (req, res) => {
         } 
     });
 });
+
 
 
 app.patch('/leave-requests/:id/cancel-approve', authenticateToken, (req, res) => {
@@ -1430,23 +1094,21 @@ app.get('/department-leaves', authenticateToken, (req, res) => {
     const userId = req.user.id;
 
     const query = `
-        SELECT 
-            e.id AS employee_id,
-            CONCAT(e.first_name, ' ', e.last_name) AS employee_name,
-            lr.type_of_leave,
-            lr.request_status,
-            ld.leave_date,
-            ld.duration,
-            ld.time
-        FROM leave_requests lr
-        JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-        JOIN employee e ON lr.employee_id = e.id
-        WHERE e.manager_id = ? OR e.id IN (
-            SELECT id FROM employee WHERE department_id = (
-                SELECT department_id FROM employee WHERE id = ?
-            )
-        )
-        AND lr.request_status IN ('Approved', 'Pending Manager')
+SELECT 
+    e.id AS employee_id,
+    CONCAT(e.first_name, ' ', e.last_name) AS employee_name,
+    lr.type_of_leave,
+    lr.request_status,
+    ld.leave_date,
+    ld.duration,
+    ld.time
+FROM leave_requests lr
+JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
+JOIN employee e ON lr.employee_id = e.id
+JOIN department d ON e.department_id = d.id
+WHERE d.manager_id = ? 
+AND lr.request_status IN ('Approved', 'Pending Manager')
+
     `;
     db.query(query, [userId, userId], (err, result) => {
         if (err) res.status(500).send(err);
@@ -1593,12 +1255,14 @@ app.get('/all-department-leaves', hrAuthenticateToken, (req, res) => {
             lr.type_of_leave,
             lr.request_status,
             ld.leave_date,
+            ld.start_time,
+            ld.end_time,
             ld.duration,
             ld.time
         FROM leave_requests lr
         JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
         JOIN employee e ON lr.employee_id = e.id
-        WHERE lr.request_status IN ('Approved', 'Pending Manager')
+        WHERE lr.request_status IN ('Approved', 'Pending Manager') 
     `;
     db.query(query, (err, result) => {
         if (err) res.status(500).send(err);
@@ -1610,12 +1274,16 @@ app.get('/remaining-timeoff/:employeeId', authenticateToken, (req, res) => {
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
 
+    console.log(`Fetching remaining time off for employeeId: ${employeeId}, Month: ${currentMonth}, Year: ${currentYear}`);
+
     const checkPTOQuery = `
         SELECT SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)) as totalMinutes
         FROM leave_request_dates
         JOIN leave_requests ON leave_request_dates.leave_request_id = leave_requests.id
-        WHERE leave_requests.employee_id = ? AND leave_requests.type_of_leave = 'Personal Time Off'
-        AND MONTH(leave_request_dates.leave_date) = ? AND YEAR(leave_request_dates.leave_date) = ?
+        WHERE leave_requests.employee_id = ? 
+        AND leave_requests.type_of_leave = 'Personal Time Off'
+        AND MONTH(leave_request_dates.leave_date) = ? 
+        AND YEAR(leave_request_dates.leave_date) = ?
         AND leave_requests.request_status != 'Cancelled'
     `;
 
@@ -1625,8 +1293,14 @@ app.get('/remaining-timeoff/:employeeId', authenticateToken, (req, res) => {
             return res.status(500).send(err);
         }
 
+        console.log('Query results:', results);
+
         const totalMinutesTaken = parseFloat(results[0].totalMinutes) || 0;
+        console.log(`Total minutes taken: ${totalMinutesTaken}`);
+
         const remainingMinutes = Math.max(0, 120 - totalMinutesTaken);
+        console.log(`Remaining minutes: ${remainingMinutes}`);
+
         res.send({ remainingMinutes });
     });
 });
