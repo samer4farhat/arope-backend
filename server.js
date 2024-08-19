@@ -86,31 +86,425 @@ function hrAuthenticateToken(req, res, next) {
     })
 }
 
-app.get('/initial/login/:email', (req, res) => {
-    const email = req.params.email;
-    var query = `
-        SELECT 
-        (EXISTS (
-            SELECT 1 
-            FROM employee 
-            WHERE email = ?
-        )) AS email_exists,
-        (EXISTS (
-            SELECT 1 
-            FROM employee 
-            WHERE email = ?
-            AND password IS NULL
-        )) AS password_is_null;
-    `;
-    db.query(query, [email, email], (err, result) => {
-        if (err) res.send(err);
-        else res.send(result[0]);
-    })
+const roundLeaveDays = (days) => {
+    const decimalPart = days - Math.floor(days);
+    let roundedDays = Math.floor(days);
+    if (decimalPart >= 0.75) {
+        roundedDays = Math.ceil(days);
+    } else if (decimalPart > 0.25 && decimalPart < 0.75) {
+        roundedDays = Math.floor(days) + 0.5;
+    }
+    return roundedDays;
+};
+
+const isManager = (employeeId) => {
+    return new Promise((resolve, reject) => {
+        const checkManagerQuery = `
+            SELECT COUNT(*) AS isManager
+            FROM department
+            WHERE manager_id = ?
+        `;
+        db.query(checkManagerQuery, [employeeId], (err, results) => {
+            if (err) {
+                console.error('Error checking if employee is a manager:', err);
+                return reject(err);
+            }
+            resolve(results[0].isManager > 0);
+        });
+    });
+};
+
+//Calculating leave days of employees who are added 
+const calculateLeaveDaysForPartialYear = (startDate, endDate, isManager) => {
+    const startMoment = moment(startDate, 'YYYY-MM-DD');
+    const leaveDaysPerYear = isManager ? 21 : 15;
+    const leaveDaysPerMonth = leaveDaysPerYear / 12;
+
+    let totalLeaveDays = 0;
+
+    // Calculate the prorated leave days for the start month
+    const daysInStartMonth = startMoment.daysInMonth();
+    const startMonthFraction = (daysInStartMonth - startMoment.date() + 1) / daysInStartMonth;
+    totalLeaveDays += startMonthFraction * leaveDaysPerMonth;
+
+    // If an end date is provided and it falls within the same year, calculate for the end month
+    if (endDate) {
+        const endMoment = moment(endDate, 'YYYY-MM-DD');
+        console.log(endMoment)
+
+        // If the end date is within the same year as the start date
+        if (endMoment.year() === startMoment.year()) {
+            const daysInEndMonth = endMoment.daysInMonth();
+            const endMonthFraction = endMoment.date() / daysInEndMonth;
+            totalLeaveDays += endMonthFraction * leaveDaysPerMonth;
+            console.log("initial: "+totalLeaveDays)
+
+
+            // Add leave days for full months between start and end dates
+            const fullMonthsBetween = endMoment.diff(startMoment, 'months') - 1;
+            totalLeaveDays += fullMonthsBetween * leaveDaysPerMonth;
+            console.log("final: "+totalLeaveDays)
+        }
+    } else {
+        // If no end date is provided or it's in the next year, calculate for the full months remaining in the year
+        const fullMonthsLeft = 11 - startMoment.month();
+        totalLeaveDays += fullMonthsLeft * leaveDaysPerMonth;
+    }
+
+    return roundLeaveDays(totalLeaveDays);
+};
+
+
+const calculateLeaveDaysPerYear = (yearsOfService, isManager) => {
+    if (isManager) {
+        return 21;
+    } else if (yearsOfService >= 15) {
+        return 21;
+    } else if (yearsOfService >= 5) {
+        return 18;
+    } else {
+        return 15;
+    }
+};
+
+const setLeaveDaysOnPromotion = (employeeId, promotionDate) => {
+    return new Promise(async (resolve, reject) => {
+        const getEmployeeQuery = `SELECT start_date, days FROM employee WHERE id = ?`;
+
+        db.query(getEmployeeQuery, [employeeId], async (err, results) => {
+            if (err) {
+                console.error('Error fetching employee details:', err);
+                return reject(err);
+            }
+
+            const { start_date: startDate, days: currentDays } = results[0];
+            console.log(`Employee details for promotion - Start Date: ${startDate}, Current Days: ${currentDays}`);
+
+            const promotionMoment = moment(promotionDate);
+            const startMoment = moment(startDate);
+            const yearsOfService = promotionMoment.diff(startMoment, 'years');
+
+            // Check if the employee is a manager
+            const isManagerStatus = await isManager(employeeId);
+
+            // Same day promotion check
+            var isSameDay = false;
+            let roundedAdjustedDays;
+
+            // Determine leave days per year
+            const initialLeaveDaysPerYear = calculateLeaveDaysPerYear(yearsOfService, isManagerStatus);
+
+            // Calculate the initial prorated days added at the start
+            let initialProratedDaysAdded;
+            if (startMoment.year() === promotionMoment.year()) {
+                if ((startMoment.month() === promotionMoment.month()) && (startMoment.date() === promotionMoment.date())) {
+                    // Employee started on the promotion date
+                    const daysInStartMonth = startMoment.daysInMonth();
+                    const startMonthDaysFraction = (daysInStartMonth - startMoment.date() + 1) / daysInStartMonth;
+                    const monthsLeftTillEndOfYear = 11 - startMoment.month();
+                    const adjustedDays = (21 / 12) * (startMonthDaysFraction + monthsLeftTillEndOfYear);
+
+                    roundedAdjustedDays = roundLeaveDays(adjustedDays);
+                    console.log(roundedAdjustedDays);
+
+                    isSameDay = true;
+                } else {
+                    // Employee started earlier in the year
+                    const daysInStartMonth = startMoment.daysInMonth();
+                    const startMonthDaysFraction = (daysInStartMonth - startMoment.date() + 1) / daysInStartMonth;
+                    const monthsLeftTillEndOfYear = 11 - startMoment.month();
+
+                    const monthsAsEmployee = startMonthDaysFraction + monthsLeftTillEndOfYear;
+                    initialProratedDaysAdded = (15 / 12) * monthsAsEmployee;
+                }
+            } else {
+                // Employee started in a previous year, so full year days were added at the start of the year
+                initialProratedDaysAdded = initialLeaveDaysPerYear;
+            }
+
+            if (isSameDay) {
+                const updateQuery = `UPDATE employee SET days = ? WHERE id = ?`;
+                db.query(updateQuery, [roundedAdjustedDays, employeeId], (err, result) => {
+                    if (err) {
+                        console.error('Error updating leave days:', err);
+                        return reject(err);
+                    }
+                    console.log(`Leave days updated for employee ID ${employeeId}: ${roundedAdjustedDays}`);
+                    resolve(result);
+                });
+            } else {
+                console.log(`Initial Prorated Days Added: ${initialProratedDaysAdded}`);
+
+                // Calculate prorated days before promotion
+                const daysInStartMonth = startMoment.daysInMonth();
+                const startMonthDaysFraction = (daysInStartMonth - startMoment.date() + 1) / daysInStartMonth;
+                const monthsLeftTillPromotion = promotionMoment.month() - startMoment.month() - 1;
+                const promotionMonthDaysFraction = promotionMoment.date() / promotionMoment.daysInMonth();
+
+                const monthsAsEmployee = startMonthDaysFraction + monthsLeftTillPromotion + promotionMonthDaysFraction;
+                const proratedDaysAsEmployee = (15 / 12) * monthsAsEmployee;
+
+                console.log(`Months as Employee: ${monthsAsEmployee}`);
+                console.log(`Prorated Days as Employee: ${proratedDaysAsEmployee}`);
+
+                // Calculate prorated days after promotion as manager
+                const daysInPromotionMonth = promotionMoment.daysInMonth();
+                const promotionMonthDaysFractionAfter = (daysInPromotionMonth - promotionMoment.date() + 1) / daysInPromotionMonth;
+                const fullMonthsBetweenPromotionAndEndOfYear = 11 - promotionMoment.month();
+
+                const monthsAsManager = promotionMonthDaysFractionAfter + fullMonthsBetweenPromotionAndEndOfYear;
+                const proratedDaysAsManager = (21 / 12) * monthsAsManager;
+
+                console.log(`Months as Manager: ${monthsAsManager}`);
+                console.log(`Prorated Days as Manager: ${proratedDaysAsManager}`);
+
+                // Calculate total new prorated days
+                const totalProratedDays = proratedDaysAsEmployee + proratedDaysAsManager;
+
+                // Adjust current leave days
+                let adjustedDays = currentDays - roundLeaveDays(initialProratedDaysAdded) + totalProratedDays;
+
+                roundedAdjustedDays = roundLeaveDays(adjustedDays);
+
+                console.log(`Adjusted Days (before rounding): ${adjustedDays}`);
+                console.log(`Rounded Adjusted Days: ${roundedAdjustedDays}`);
+
+                const updateQuery = `UPDATE employee SET days = ? WHERE id = ?`;
+                db.query(updateQuery, [roundedAdjustedDays, employeeId], (err, result) => {
+                    if (err) {
+                        console.error('Error updating leave days:', err);
+                        return reject(err);
+                    }
+                    console.log(`Leave days updated for employee ID ${employeeId}: ${roundedAdjustedDays}`);
+                    resolve(result);
+                });
+            }
+        });
+    });
+};
+
+const adjustLeaveDaysOnServiceAnniversary = (employeeId, adjustmentDate) => {
+    return new Promise((resolve, reject) => {
+        const checkIfManagerQuery = `SELECT * FROM arope_db.department WHERE manager_id = ?`;
+
+        db.query(checkIfManagerQuery, [employeeId], (err, results) => {
+            if (results.length != 0) {
+                return resolve();
+            }
+        })
+
+        const getEmployeeQuery = `SELECT start_date, days FROM employee WHERE id = ?`;
+        db.query(getEmployeeQuery, [employeeId], (err, results) => {
+            if (err) {
+                console.error('Error fetching employee details:', err);
+                return reject(err);
+            }
+
+            const { start_date: startDate, days: currentDays } = results[0];
+            console.log(`Employee details - Start Date: ${startDate}, Current Days: ${currentDays}`);
+
+            const adjustmentMoment = moment(adjustmentDate);
+            const startMoment = moment(startDate);
+
+            let yearsOfService = adjustmentMoment.diff(startMoment, 'years');
+            console.log(`Calculated Years of Service (initial): ${yearsOfService}`);
+
+            // Adjust yearsOfService if today is the anniversary date
+            if (adjustmentMoment.month() === startMoment.month() && adjustmentMoment.date() === startMoment.date()) {
+                yearsOfService += 1;
+            }
+
+            console.log(`Years of Service (after anniversary check): ${yearsOfService}`);
+            console.log(`Adjustment Moment: ${adjustmentMoment.format('YYYY-MM-DD')}`);
+            console.log(`Start Moment: ${startMoment.format('YYYY-MM-DD')}`);
+
+            const daysInServiceChangeMonth = adjustmentMoment.daysInMonth();
+            const serviceChangeMonthDaysFractionBefore = (adjustmentMoment.date()) / daysInServiceChangeMonth;
+            const monthsBeforeServiceChange = adjustmentMoment.month();
+            const monthsAfterServiceChange = 11 - monthsBeforeServiceChange;
+            const serviceChangenMonthDaysFractionAfter = (daysInServiceChangeMonth - adjustmentMoment.date() + 1) / daysInServiceChangeMonth;
+
+            console.log(`Months Before Service Change: ${monthsBeforeServiceChange}`);
+            console.log(`Months After Service Change: ${monthsAfterServiceChange}`);
+
+            let leaveDaysBeforeAdjustment, leaveDaysAfterAdjustment;
+
+            if (yearsOfService === 5) {
+                leaveDaysBeforeAdjustment = 15;
+                leaveDaysAfterAdjustment = 18;
+            } else if (yearsOfService === 15) {
+                leaveDaysBeforeAdjustment = 18;
+                leaveDaysAfterAdjustment = 21;
+            } else {
+                console.log(`No adjustment needed for employee ID: ${employeeId} - not hitting 5 or 15 years milestone`);
+                return resolve(); // No adjustment needed if not hitting 5 or 15 years milestone
+            }
+
+            const leaveDaysAccruedBeforeAdjustment = (leaveDaysBeforeAdjustment / 12) * (monthsBeforeServiceChange + serviceChangeMonthDaysFractionBefore);
+            const leaveDaysAccruedAfterAdjustment = (leaveDaysAfterAdjustment / 12) * (monthsAfterServiceChange + serviceChangenMonthDaysFractionAfter);
+
+            // Calculate days added at the start of the year
+            const initialProratedDaysAdded = yearsOfService === 5 ? 15 : 18;
+
+            console.log(`Leave Days Before Adjustment: ${leaveDaysBeforeAdjustment}`);
+            console.log(`Leave Days After Adjustment: ${leaveDaysAfterAdjustment}`);
+            console.log(`Leave Days Accrued Before Adjustment: ${leaveDaysAccruedBeforeAdjustment}`);
+            console.log(`Leave Days Accrued After Adjustment: ${leaveDaysAccruedAfterAdjustment}`);
+            console.log(`Initial Prorated Days Added: ${initialProratedDaysAdded}`);
+
+            let newLeaveDays = currentDays - initialProratedDaysAdded + leaveDaysAccruedBeforeAdjustment + leaveDaysAccruedAfterAdjustment;
+
+            console.log(`New Leave Days (before rounding): ${newLeaveDays}`);
+            const roundedNewLeaveDays = roundLeaveDays(newLeaveDays);
+
+            console.log(`Rounded New Leave Days: ${roundedNewLeaveDays}`);
+
+            const updateQuery = `UPDATE employee SET days = ? WHERE id = ?`;
+            db.query(updateQuery, [roundedNewLeaveDays, employeeId], (err, result) => {
+                if (err) {
+                    console.error('Error updating leave days:', err);
+                    return reject(err);
+                }
+                console.log(`Leave days updated for employee ID: ${employeeId}`);
+                resolve(result);
+            });
+        });
+    });
+};
+const updateLeaveDaysOnJan1 = () => {
+    return new Promise((resolve, reject) => {
+        const currentYear = moment().year();
+        const getEmployeesQuery = `
+            SELECT id, start_date, end_date 
+            FROM employee
+        `;
+
+        db.query(getEmployeesQuery, (err, employees) => {
+            if (err) {
+                console.error('Error fetching employees:', err);
+                return reject(err);
+            }
+
+            const updatePromises = employees.map(employee => {
+                const { id, start_date, end_date } = employee;
+                const startMoment = moment(start_date);
+                const yearsOfService = currentYear - startMoment.year();
+
+                return isManager(id).then(isManager => {
+                    let leaveDays;
+
+                    if (end_date && moment(end_date).year() === currentYear) {
+                        // Prorate leave days if the end date is within the current year
+                        leaveDays = calculateLeaveDays(start_date, end_date, isManager, yearsOfService, 0, 12);
+                    } else {
+                        // Full leave days if no end date or end date is outside the current year
+                        leaveDays = calculateLeaveDays(start_date, null, isManager, yearsOfService, 0, 12);
+                    }
+
+                    const updateQuery = `UPDATE employee SET days = days + ? WHERE id = ?`;
+                    return db.query(updateQuery, [leaveDays, id]);
+                });
+            });
+
+            Promise.all(updatePromises)
+                .then(results => {
+                    console.log('Leave days updated successfully for all employees');
+                    resolve(results);
+                })
+                .catch(err => {
+                    console.error('Error updating leave days:', err);
+                    reject(err);
+                });
+        });
+    });
+};
+
+
+
+// Schedule the updateLeaveDaysOnJan1 function to run today at 12:07 PM for testing
+cron.schedule('0 0 1 1 *', () => {
+    console.log('Starting leave days update at 12:07 PM...');
+    updateLeaveDaysOnJan1()
+        .then(() => {
+            console.log('Leave days updated for all employees');
+        })
+        .catch(err => {
+            console.error('Error running the leave update:', err);
+        });
 });
+
+const checkAndAdjustServiceAnniversaries = () => {
+    return new Promise((resolve, reject) => {
+        const currentDate = moment().format('MM-DD');
+        console.log(`Current Date for Anniversary Check: ${currentDate}`);
+
+        const getEmployeesQuery = `
+            SELECT id, start_date 
+            FROM employee 
+            WHERE DATE_FORMAT(start_date, '%m-%d') = ?
+        `;
+        
+        db.query(getEmployeesQuery, [currentDate], (err, employees) => {
+            if (err) {
+                console.error('Error fetching employees:', err);
+                return reject(err);
+            }
+
+            console.log(`Employees with service anniversary today: ${employees.length}`);
+            employees.forEach(employee => {
+                console.log(`Employee ID: ${employee.id}, Start Date: ${employee.start_date}`);
+            });
+
+            const adjustmentPromises = employees.map(employee => {
+                return adjustLeaveDaysOnServiceAnniversary(employee.id, moment().format('YYYY-MM-DD'))
+                    .then(() => {
+                        console.log(`Leave days adjusted for employee ID: ${employee.id}`);
+                    })
+                    .catch(err => {
+                        console.error(`Error adjusting leave days for employee ID: ${employee.id}`, err);
+                    });
+            });
+
+            Promise.all(adjustmentPromises)
+                .then(results => {
+                    console.log('Leave days adjusted successfully for service anniversaries');
+                    resolve(results);
+                })
+                .catch(err => {
+                    console.error('Error adjusting leave days:', err);
+                    reject(err);
+                });
+        });
+    });
+};
+
+// Schedule the checkAndAdjustServiceAnniversaries function to run daily at 10:49 AM
+cron.schedule('00 00 * * *', () => {
+    console.log('Starting daily service anniversary check at 10:49 AM...');
+    checkAndAdjustServiceAnniversaries()
+        .then(() => {
+            console.log('Service anniversary check completed');
+        })
+        .catch(err => {
+            console.error('Error running the service anniversary check:', err);
+        });
+});
+
+
+
+app.post('/fuckufarhat', async (req, res) => {
+    checkAndAdjustServiceAnniversaries();
+    res.send("Fuck You Farhat");
+});
+
+
+
+
+
 
 app.get('/employee', hrAuthenticateToken, (req, res) => {
     var query = `
-        SELECT e.id, e.first_name, e.middle_name, e.last_name, e.email, e.days, d.name AS "department_name", e.manager_id, me.first_name AS "manager_first_name", me.last_name AS "manager_last_name" 
+        SELECT e.id, e.first_name, e.middle_name, e.last_name, e.email, e.days, d.name AS "department_name", e.manager_id, me.first_name AS "manager_first_name", me.last_name AS "manager_last_name", e.birthday, e.start_date, e.end_date
         FROM employee e
         LEFT JOIN department d
         ON e.department_id = d.id
@@ -123,39 +517,97 @@ app.get('/employee', hrAuthenticateToken, (req, res) => {
     });
 });
 
+// app.get('/employee/:id', (req, res) => {
+//     const id = req.params.id;
+//     var query = `
+//         SELECT e.id, e.first_name, e.middle_name, e.last_name, e.email, e.days, d.id AS "department_id", d.name AS "department_name", e.manager_id, me.first_name AS "manager_first_name", me.last_name AS "manager_last_name", e.birthday, e.start_date, e.end_date
+//         FROM employee e
+//         LEFT JOIN department d
+//         ON e.department_id = d.id
+//         LEFT JOIN employee me
+//         ON e.manager_id = me.id
+//         WHERE e.id = ${id};
+//     `;
+//     db.query(query, (err, result) => {
+//         if (err) res.send(err);
+//         else res.send(result[0]);
+//     });
+// });
+
 app.get('/employee/:id', (req, res) => {
     const id = req.params.id;
-    var query = `
-        SELECT e.id, e.first_name, e.middle_name, e.last_name, e.email, e.days, d.id AS "department_id", d.name AS "department_name", e.manager_id, me.first_name AS "manager_first_name", me.last_name AS "manager_last_name"
+    const query = `
+        SELECT 
+            e.id, 
+            e.first_name, 
+            e.middle_name, 
+            e.last_name, 
+            e.email, 
+            e.days, 
+            d.id AS "department_id", 
+            d.name AS "department_name", 
+            e.manager_id, 
+            me.first_name AS "manager_first_name", 
+            me.last_name AS "manager_last_name", 
+            e.birthday, 
+            e.start_date, 
+            e.end_date,
+            EXISTS(
+                SELECT 1 
+                FROM department 
+                WHERE manager_id = e.id
+            ) AS is_manager
         FROM employee e
-        LEFT JOIN department d
-        ON e.department_id = d.id
-        LEFT JOIN employee me
-        ON e.manager_id = me.id
-        WHERE e.id = ${id};
+        LEFT JOIN department d ON e.department_id = d.id
+        LEFT JOIN employee me ON e.manager_id = me.id
+        WHERE e.id = ?;
     `;
-    db.query(query, (err, result) => {
-        if (err) res.send(err);
+    db.query(query, [id], (err, result) => {
+        if (err) res.status(500).send(err);
         else res.send(result[0]);
     });
 });
 
+
 app.post('/employee', hrAuthenticateToken, async (req, res) => {
-    const { firstName, middleName, lastName, departmentId, managerId, birthday } = req.body;
+    const { firstName, middleName, lastName, departmentId, managerId, birthday, startDate, endDate } = req.body;
     const hrUserId = getIdFromToken(req); // Get HR user ID from token
     const email = firstName.toLowerCase()[0] + lastName.toLowerCase() + "@arope.com";
-    
+
+    // Check if managerId is provided, if not, set it to NULL
+    const managerIdValue = managerId ? managerId : null;
+
     const query = `
         INSERT INTO employee 
-        (first_name, middle_name, last_name, email, department_id, manager_id, birthday) 
-        VALUES (?,?,?,?,?,?,?);
+        (first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date) 
+        VALUES (?,?,?,?,?,?,?,?,?);
     `;
-    db.query(query, [firstName, middleName, lastName, email, departmentId, managerId, birthday], (err, result) => {
+    db.query(query, [firstName, middleName, lastName, email, departmentId, managerIdValue, birthday, startDate, endDate], (err, result) => {
         if (err) {
             res.send(err);
         } else {
-            addLog(hrUserId, 'Add Employee', `Added employee: ${firstName} ${middleName} ${lastName}`);
-            res.send(result);
+            const newEmployeeId = result.insertId;
+
+            isManager(newEmployeeId).then(isManagerImmediately => {
+                console.log(`New Employee ID: ${newEmployeeId}`);
+                console.log(`Is Manager Immediately: ${isManagerImmediately}`);
+
+                const proratedLeaveDays = calculateLeaveDaysForPartialYear(startDate, endDate, isManagerImmediately);
+
+                console.log(`Prorated Leave Days: ${proratedLeaveDays}`);
+
+                db.query(`UPDATE employee SET days = ? WHERE id = ?`, [proratedLeaveDays, newEmployeeId], (err, updateResult) => {
+                    if (err) {
+                        console.error('Error updating prorated leave days:', err);
+                        res.status(500).send(err);
+                    } else {
+                        res.send({ id: newEmployeeId });
+                    }
+                });
+            }).catch(err => {
+                console.error('Error checking if employee is a manager:', err);
+                res.status(500).send(err);
+            });
         }
     });
 });
@@ -170,13 +622,14 @@ app.patch('/employee/:id', hrAuthenticateToken, (req, res) => {
         } else {
             const originalEmployee = result[0];
             const updatedEmployee = { ...originalEmployee, ...camelToSnake(req.body) };
-            const { first_name, middle_name, last_name, email, department_id, manager_id } = updatedEmployee;
+            const { first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date } = updatedEmployee;
+
             const query = `
                 UPDATE employee
-                SET first_name = ?, middle_name = ?, last_name = ?, email = ?, department_id = ?, manager_id = ? 
+                SET first_name = ?, middle_name = ?, last_name = ?, email = ?, department_id = ?, manager_id = ?, birthday = ?, start_date = ?, end_date = ? 
                 WHERE id = ?;
             `;
-            db.query(query, [first_name, middle_name, last_name, email, department_id, manager_id, id], (err, result) => {
+            db.query(query, [first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date, id], (err, result) => {
                 if (err) {
                     res.send(err);
                 } else {
@@ -207,6 +660,191 @@ app.delete('/employee/:id', async (req, res) => {
     });
 });
 
+app.patch('/departments/:id', hrAuthenticateToken, (req, res) => {
+    const departmentId = req.params.id;
+    const { name, manager_id } = req.body;
+    const hrUserId = getIdFromToken(req); // Get HR user ID from token
+    const promotionDate = moment().format('YYYY-MM-DD'); // Current date
+
+    console.log(`Updating department ${departmentId} with new manager ID: ${manager_id}`);
+
+    // Fetch the new manager's current manager_id and start_date
+    const getNewManagerQuery = `
+        SELECT manager_id, start_date, days
+        FROM employee
+        WHERE id = ?;
+    `;
+
+    db.query(getNewManagerQuery, [manager_id], (err, result) => {
+        if (err) {
+            console.error('Error fetching new manager details:', err);
+            return res.status(500).send(err);
+        }
+
+        if (!result || result.length === 0) {
+            console.error('New manager not found');
+            return res.status(404).send({ error: 'New manager not found' });
+        }
+
+        const { manager_id: currentManagerId, start_date: startDate, days: currentDays } = result[0];
+        console.log(`Fetched new manager details: currentManagerId=${currentManagerId}, startDate=${startDate}, currentDays=${currentDays}`);
+
+        // Update the department
+        const updateDepartmentQuery = `
+            UPDATE department
+            SET name = ?, manager_id = ?
+            WHERE id = ?;
+        `;
+
+        db.query(updateDepartmentQuery, [name, manager_id, departmentId], (err, result) => {
+            if (err) {
+                console.error('Error updating department:', err);
+                return res.status(500).send(err);
+            }
+
+            console.log(`Updated department ${departmentId} with new manager ID: ${manager_id}`);
+
+            // Update the manager_id of all employees in the department except the manager himself
+            const updateEmployeesQuery = `
+                UPDATE employee
+                SET manager_id = ?
+                WHERE department_id = ? AND id != ?;
+            `;
+
+            db.query(updateEmployeesQuery, [manager_id, departmentId, manager_id], (err, result) => {
+                if (err) {
+                    console.error('Error updating employees:', err);
+                    return res.status(500).send(err);
+                }
+
+                console.log(`Updated all employees in department ${departmentId} with new manager ID: ${manager_id}, excluding the manager himself`);
+
+                // Use setLeaveDaysOnPromotion for leave days calculation and update
+                setLeaveDaysOnPromotion(manager_id, promotionDate)
+                    .then(() => {
+                        console.log(`Leave days updated successfully for new manager ID: ${manager_id}`);
+                        addLog(hrUserId, 'Promote Employee', `Promoted employee ID: ${manager_id} with updated leave days.`);
+                        res.send({ message: 'Department and manager updated successfully' });
+                    })
+                    .catch(err => {
+                        console.error('Error updating leave days:', err);
+                        res.status(500).send(err);
+                    });
+            });
+        });
+    });
+});
+
+
+
+
+
+
+
+
+
+
+
+
+// Add other routes here, similar to the ones above, ensuring they follow similar structures for consistency and security
+
+// Function to add birthday leave
+function addBirthdayLeave() {
+    const today = moment().format('MM-DD');
+    
+    const query = `
+        SELECT id, first_name, last_name 
+        FROM employee 
+        WHERE DATE_FORMAT(birthday, '%m-%d') = ?
+    `;
+
+    db.query(query, [today], (err, results) => {
+        if (err) {
+            console.error('Error fetching employees with birthdays:', err);
+            return;
+        }
+
+        results.forEach(employee => {
+            const updateQuery = `UPDATE employee SET days = days + 1 WHERE id = ?`;
+            db.query(updateQuery, [employee.id], (updateErr, updateResult) => {
+                if (updateErr) {
+                    console.error(`Error updating leave days for employee ID ${employee.id}:`, updateErr);
+                    return;
+                }
+
+                // Insert leave request for the birthday leave
+                const leaveRequestQuery = `
+                    INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
+                    VALUES (?, 'Birthday', 'Add', 1, NOW(), NOW(), NOW())
+                `;
+                db.query(leaveRequestQuery, [employee.id], (leaveErr, leaveResult) => {
+                    if (leaveErr) {
+                        console.error('Error inserting leave request for birthday leave:', leaveErr);
+                        return;
+                    }
+
+                    const dateQuery = `
+                        INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, time)
+                        VALUES (?, NOW(), ?, ?)
+                    `;
+                    db.query(dateQuery, [leaveResult.insertId, 1, null]);
+
+                    const logQuery = `
+                        INSERT INTO logs (hr_user, action, details, timestamp)
+                        VALUES (?, 'Birthday', 'Added 1 day for birthday to ${employee.first_name} ${employee.last_name}', NOW())
+                    `;
+                    db.query(logQuery, [employee.id], (logErr, logResult) => {
+                        if (logErr) {
+                            console.error('Error logging birthday leave addition:', logErr);
+                        }
+                    });
+                });
+            });
+        });
+    });
+}
+
+// Schedule the addBirthdayLeave function to run daily at midnight
+cron.schedule('0 0 * * *', () => {
+    addBirthdayLeave();
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+app.get('/initial/login/:email', (req, res) => {
+    const email = req.params.email;
+    var query = `
+        SELECT 
+        (EXISTS (
+            SELECT 1 
+            FROM employee 
+            WHERE email = ?
+        )) AS email_exists,
+        (EXISTS (
+            SELECT 1 
+            FROM employee 
+            WHERE email = ?
+            AND password IS NULL
+        )) AS password_is_null;
+    `;
+    db.query(query, [email, email], (err, result) => {
+        if (err) res.send(err);
+        else res.send(result[0]);
+    })
+});
+
+
 app.post('/login', async (req, res) => {
     const { email, password, isInitialLogin } = req.body;
 
@@ -226,7 +864,7 @@ app.post('/login', async (req, res) => {
                 if (err) {
                     res.status(500).send(err);
                 } else {
-                    const isManager = managerResult[0].is_manager > 0 || user.manager_id === null;
+                    const isManager = managerResult[0].is_manager > 0;
 
                     if (isInitialLogin) {
                         bcrypt.hash(password, bcrypt.genSaltSync(12), (err, hashedPassword) => {
@@ -305,31 +943,6 @@ app.post('/departments', hrAuthenticateToken, async (req, res) => {
         }
     });
 });
-app.patch('/departments/:id', hrAuthenticateToken, (req, res) => {
-    const id = req.params.id;
-    const hrUserId = getIdFromToken(req); // Get HR user ID from token
-
-    db.query(`SELECT * FROM department WHERE id = ?`, [id], (err, result) => {
-        if (err) {
-            res.send(err);
-        } else {
-            const originalDepartment = result[0];
-            const query = `
-                UPDATE department
-                SET name = ?, manager_id = ?
-                WHERE id = ?;
-            `;
-            db.query(query, [req.body.name, req.body.manager_id, id], (err, result) => {
-                if (err) {
-                    res.send(err);
-                } else {
-                    addLog(hrUserId, 'Edit Department', `Edited department: ${originalDepartment.name} -> ${req.body.name}, manager ID: ${req.body.manager_id}`);
-                    res.send(result);
-                }
-            });
-        }
-    });
-});
 
 
 app.get('/managers/:department', (req, res) => {
@@ -368,6 +981,22 @@ app.get('/manager/:departmentId', authenticateToken, async (req, res) => {
     }
 });
 
+app.get('/managers-of-managers', authenticateToken, async (req, res) => {
+    try {
+        const query = `
+            SELECT e.id, e.first_name, e.last_name FROM employee e
+            WHERE e.department_id = 13
+        `;
+        db.query(query, (err, result) => {
+            if (err) res.send(err);
+            else res.send(result);
+        })
+    } catch (error) {
+        console.error('Error fetching managers of managers:', error);  // Log detailed error
+        res.status(500).json({ message: 'Internal Server Error', error: error.message });  // Return detailed error
+    }
+});
+
 app.post('/leave-requests', authenticateToken, (req, res) => {
     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
     console.log('Received leave request:', req.body);
@@ -396,7 +1025,7 @@ app.post('/leave-requests', authenticateToken, (req, res) => {
             return res.status(400).send({ message: 'Leave request cannot be made on holidays' });
         }
 
-        // Existing leave request logic
+        // Handle special leave types: Sick Leave Without Note, Unpaid Leave
         if (typeOfLeave === 'Sick Leave Without Note') {
             const checkSickLeaveQuery = `
                 SELECT SUM(quantity) as total
@@ -456,37 +1085,73 @@ app.post('/leave-requests', authenticateToken, (req, res) => {
         }
 
         function insertLeaveRequest() {
+            // Calculate start date, end date, and quantity based on the leave type
+            let startDate = leaveDetails.sort((a,b) => new Date(a.date) - new Date(b.date))[0].date;
+            let endDate;
+            let calculatedQuantity;
+        
+            if (typeOfLeave === 'Marital') {
+                calculatedQuantity = 7.0;
+                endDate = moment(startDate).add(6, 'days').format('YYYY-MM-DD');
+            } else if (typeOfLeave === 'Maternity') {
+                calculatedQuantity = 70.0;
+                endDate = moment(startDate).add(69, 'days').format('YYYY-MM-DD');
+            } else if (typeOfLeave === 'Paternity') {
+                calculatedQuantity = 3.0;
+                endDate = moment(startDate).add(2, 'days').format('YYYY-MM-DD');
+            } else {
+                calculatedQuantity = quantity;
+                endDate = leaveDetails[leaveDetails.length - 1].date;
+            }
+        
             const query = `
                 INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
                 VALUES (?, ?, ?, ?, ?, ?, NOW())
             `;
-
-            const startDate = leaveDetails[0].date;
-            const endDate = leaveDetails[leaveDetails.length - 1].date;
-
-            db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
+        
+            db.query(query, [employeeId, typeOfLeave, "Pending Manager", calculatedQuantity, startDate, endDate], (err, result) => {
                 if (err) {
                     console.error('Error adding leave request:', err);
                     return res.status(500).send(err);
                 }
-
+        
                 const leaveRequestId = result.insertId;
-                const dateQueries = leaveDetails.map(detail => (
+                let dateRange = [];
+        
+                if (typeOfLeave === 'Marital') {
+                    dateRange = Array.from({ length: 7 }, (_, i) => moment(startDate).add(i, 'days').format('YYYY-MM-DD'));
+                } else if (typeOfLeave === 'Maternity') {
+                    dateRange = Array.from({ length: 70 }, (_, i) => moment(startDate).add(i, 'days').format('YYYY-MM-DD'));
+                } else if (typeOfLeave === 'Paternity') {
+                    dateRange = Array.from({ length: 3 }, (_, i) => moment(startDate).add(i, 'days').format('YYYY-MM-DD'));
+                } else {
+                    // For other types, use the dates provided in leaveDetails
+                    dateRange = leaveDetails.map(detail => detail.date);
+                }
+        
+                // Insert each date from the dateRange into the leave_request_dates table
+                const dateQueries = dateRange.map(date => (
                     new Promise((resolve, reject) => {
                         const dateQuery = `
                             INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, start_time, end_time, time)
                             VALUES (?, ?, ?, ?, ?, ?)
                         `;
-                        const time = detail.duration === '0.5' ? detail.time : null;
-                        db.query(dateQuery, [leaveRequestId, detail.date, detail.duration || null, detail.start_time, detail.end_time, time], (err, dateResult) => {
+                        const detail = leaveDetails.find(detail => detail.date === date) || {}; // Find matching detail or default to empty
+                        const duration = detail.duration || '1.0'; // Default to full day if not specified
+                        const time = detail.time || 'N/A';
+                        const startTime = detail.start_time || null;
+                        const endTime = detail.end_time || null;
+        
+                        db.query(dateQuery, [leaveRequestId, date, duration, startTime, endTime, time], (err, dateResult) => {
                             if (err) reject(err);
                             else resolve(dateResult);
                         });
                     })
                 ));
-
+        
                 Promise.all(dateQueries)
                     .then(() => {
+
                         res.send({ message: 'Leave request added successfully' });
                     })
                     .catch(err => {
@@ -495,8 +1160,139 @@ app.post('/leave-requests', authenticateToken, (req, res) => {
                     });
             });
         }
+        
     });
 });
+
+// app.post('/leave-requests', authenticateToken, (req, res) => {
+//     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
+//     console.log('Received leave request:', req.body);
+
+//     // Fetch holidays
+//     const holidayQuery = `
+//         SELECT start_date, end_date
+//         FROM holidays
+//     `;
+
+//     db.query(holidayQuery, (err, holidays) => {
+//         if (err) {
+//             console.error('Error fetching holidays:', err);
+//             return res.status(500).send(err);
+//         }
+
+//         // Check if any leaveDetails fall within the holidays
+//         const leaveDates = leaveDetails.map(detail => detail.date);
+//         const isHoliday = holidays.some(holiday => {
+//             const startDate = moment(holiday.start_date);
+//             const endDate = moment(holiday.end_date);
+//             return leaveDates.some(date => moment(date).isBetween(startDate, endDate, 'days', '[]'));
+//         });
+
+//         if (isHoliday) {
+//             return res.status(400).send({ message: 'Leave request cannot be made on holidays' });
+//         }
+
+//         // Existing leave request logic
+//         if (typeOfLeave === 'Sick Leave Without Note') {
+//             const checkSickLeaveQuery = `
+//                 SELECT SUM(quantity) as total
+//                 FROM leave_requests
+//                 WHERE employee_id = ? AND type_of_leave = 'Sick Leave Without Note' AND request_status != 'Cancelled'
+//             `;
+
+//             db.query(checkSickLeaveQuery, [employeeId], (err, results) => {
+//                 if (err) {
+//                     console.error('Database query error:', err);
+//                     return res.status(500).send(err);
+//                 }
+
+//                 const totalDaysWithoutNote = parseFloat(results[0].total) || 0;
+//                 const requestQuantity = parseFloat(quantity);
+//                 const totalRequested = totalDaysWithoutNote + requestQuantity;
+
+//                 console.log("Total days without note:", totalDaysWithoutNote);
+//                 console.log("Requested quantity:", requestQuantity);
+//                 console.log("Total requested days:", totalRequested);
+
+//                 if (totalRequested > 2) {
+//                     return res.status(400).send({ message: 'You cannot request more than 2 sick leave days without a note.' });
+//                 }
+
+//                 insertLeaveRequest();
+//             });
+//         } else if (typeOfLeave === 'Unpaid Leave') {
+//             const checkUnpaidLeaveQuery = `
+//                 SELECT SUM(quantity) as total
+//                 FROM leave_requests
+//                 WHERE employee_id = ? AND type_of_leave = 'Unpaid Leave' AND request_status != 'Cancelled'
+//             `;
+
+//             db.query(checkUnpaidLeaveQuery, [employeeId], (err, results) => {
+//                 if (err) {
+//                     console.error('Database query error:', err);
+//                     return res.status(500).send(err);
+//                 }
+
+//                 const totalUnpaidLeaveDays = parseFloat(results[0].total) || 0;
+//                 const requestQuantity = parseFloat(quantity);
+//                 const totalRequested = totalUnpaidLeaveDays + requestQuantity;
+
+//                 console.log("Total unpaid leave days:", totalUnpaidLeaveDays);
+//                 console.log("Requested quantity:", requestQuantity);
+//                 console.log("Total requested days:", totalRequested);
+
+//                 if (totalRequested > 5) {
+//                     return res.status(400).send({ message: 'You cannot request more than 5 unpaid leave days.' });
+//                 }
+
+//                 insertLeaveRequest();
+//             });
+//         } else {
+//             insertLeaveRequest();
+//         }
+
+//         function insertLeaveRequest() {
+//             const query = `
+//                 INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
+//                 VALUES (?, ?, ?, ?, ?, ?, NOW())
+//             `;
+
+//             const startDate = leaveDetails[0].date;
+//             const endDate = leaveDetails[leaveDetails.length - 1].date;
+
+//             db.query(query, [employeeId, typeOfLeave, "Pending Manager", quantity, startDate, endDate], (err, result) => {
+//                 if (err) {
+//                     console.error('Error adding leave request:', err);
+//                     return res.status(500).send(err);
+//                 }
+
+//                 const leaveRequestId = result.insertId;
+//                 const dateQueries = leaveDetails.map(detail => (
+//                     new Promise((resolve, reject) => {
+//                         const dateQuery = `
+//                             INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, start_time, end_time, time)
+//                             VALUES (?, ?, ?, ?, ?, ?)
+//                         `;
+//                         const time = detail.duration === '0.5' ? detail.time : null;
+//                         db.query(dateQuery, [leaveRequestId, detail.date, detail.duration || null, detail.start_time, detail.end_time, time], (err, dateResult) => {
+//                             if (err) reject(err);
+//                             else resolve(dateResult);
+//                         });
+//                     })
+//                 ));
+
+//                 Promise.all(dateQueries)
+//                     .then(() => {
+//                         res.send({ message: 'Leave request added successfully' });
+//                     })
+//                     .catch(err => {
+//                         console.error('Error adding leave request dates:', err);
+//                         res.status(500).send(err);
+//                     });
+//             });
+//         }
+//     });
+// });
 
 app.get('/previous-unpaid-leave-days/:employeeId', authenticateToken, (req, res) => {
     const employeeId = req.params.employeeId;
@@ -585,6 +1381,45 @@ app.get('/logs', (req, res) => {
 });
 
 
+// app.get('/manager-leave-requests', authenticateToken, (req, res) => {
+//     const userId = req.user.id;
+
+//     const query = `
+//                     SELECT 
+//                         lr.id,
+//                         lr.employee_id AS employeeId, 
+//                         CONCAT(e.first_name, ' ', e.last_name) AS name,
+//                         lr.type_of_leave AS typeOfLeave, 
+//                         lr.request_status AS requestStatus, 
+//                         SUM(ld.duration) AS quantity,
+//                         CASE 
+//                             WHEN lr.type_of_leave IN ('Maternity', 'Paternity', 'Marital') 
+//                             THEN CONCAT(lr.start_date, ' >> ', lr.end_date)
+//                             ELSE GROUP_CONCAT(ld.leave_date)
+//                         END AS dates,
+//                         GROUP_CONCAT(
+//                             CASE 
+//                                 WHEN lr.type_of_leave = 'Personal Time Off' THEN CONCAT(DATE_FORMAT(ld.start_time, '%H:%i'), ' >> ', DATE_FORMAT(ld.end_time, '%H:%i'))
+//                                 WHEN ld.duration = 0.5 THEN ld.time
+//                                 ELSE 'N/A'
+//                             END
+//                         ) AS time,
+//                         lr.last_modified AS lastModified 
+//                     FROM leave_requests lr
+//                     JOIN employee e ON lr.employee_id = e.id
+//                     LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
+//                     JOIN department d ON e.department_id = d.id
+//                     WHERE d.manager_id = ?
+//                     GROUP BY lr.id
+//                     ORDER BY lastModified DESC
+
+//     `;
+//     db.query(query, [userId, userId], (err, result) => {
+//         if (err) res.send(err);
+//         else res.send(result);
+//     });
+// });
+
 app.get('/manager-leave-requests', authenticateToken, (req, res) => {
     const userId = req.user.id;
 
@@ -596,25 +1431,28 @@ app.get('/manager-leave-requests', authenticateToken, (req, res) => {
                         lr.type_of_leave AS typeOfLeave, 
                         lr.request_status AS requestStatus, 
                         SUM(ld.duration) AS quantity,
-                        GROUP_CONCAT(ld.leave_date) AS dates,
+                        CASE 
+                            WHEN lr.type_of_leave IN ('Maternity', 'Paternity', 'Marital') 
+                            THEN CONCAT(lr.start_date, ' >> ', lr.end_date)
+                            ELSE GROUP_CONCAT(ld.leave_date)
+                        END AS dates,
                         GROUP_CONCAT(
                             CASE 
                                 WHEN lr.type_of_leave = 'Personal Time Off' THEN CONCAT(DATE_FORMAT(ld.start_time, '%H:%i'), ' >> ', DATE_FORMAT(ld.end_time, '%H:%i'))
                                 WHEN ld.duration = 0.5 THEN ld.time
-                                ELSE ''
+                                ELSE 'N/A'
                             END
                         ) AS time,
                         lr.last_modified AS lastModified 
                     FROM leave_requests lr
                     JOIN employee e ON lr.employee_id = e.id
                     LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-                    JOIN department d ON e.department_id = d.id
-                    WHERE d.manager_id = ?
+                    JOIN employee m ON e.manager_id = m.id
+                    WHERE m.id = ?
                     GROUP BY lr.id
                     ORDER BY lastModified DESC
-
     `;
-    db.query(query, [userId, userId], (err, result) => {
+    db.query(query, [userId], (err, result) => {
         if (err) res.send(err);
         else res.send(result);
     });
@@ -701,9 +1539,44 @@ app.post('/leave-requests/hr', authenticateToken, (req, res) => {
         });
     });
 });
+// app.get('/leave-requests/:id', authenticateToken, (req, res) => {
+//     const id = req.params.id;
+//     console.log('Fetching leave requests for employee:', id);
 
+//     const query = `
+//         SELECT 
+//             lr.id,
+//             lr.employee_id AS employeeId, 
+//             CONCAT(e.first_name, ' ', e.last_name) AS name,
+//             lr.type_of_leave AS typeOfLeave, 
+//             lr.request_status AS requestStatus, 
+//             SUM(ld.duration) AS quantity,
+//             GROUP_CONCAT(ld.leave_date) AS dates,
+//             GROUP_CONCAT(
+//                 CASE 
+//                     WHEN lr.type_of_leave = 'Personal Time Off' THEN CONCAT(DATE_FORMAT(ld.start_time, '%H:%i'), ' >> ',DATE_FORMAT(ld.end_time, '%H:%i'))
+//                     WHEN ld.duration = 0.5 THEN ld.time
+//                     ELSE 'N/A'
+//                 END
+//             ) AS time,
+//             lr.last_modified AS lastModified
+//         FROM leave_requests lr
+//         JOIN employee e ON lr.employee_id = e.id
+//         LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
+//         WHERE lr.employee_id = ?
+//         GROUP BY lr.id
+//         ORDER BY lr.last_modified DESC
+//     `;
 
-
+//     db.query(query, [id], (err, result) => {
+//         if (err) {
+//             console.error('Error fetching leave requests:', err);
+//             return res.status(500).send(err);
+//         }
+        
+//         res.send(result);
+//     });
+// });
 app.get('/leave-requests/:id', authenticateToken, (req, res) => {
     const id = req.params.id;
     console.log('Fetching leave requests for employee:', id);
@@ -715,8 +1588,12 @@ app.get('/leave-requests/:id', authenticateToken, (req, res) => {
             CONCAT(e.first_name, ' ', e.last_name) AS name,
             lr.type_of_leave AS typeOfLeave, 
             lr.request_status AS requestStatus, 
-            SUM(ld.duration) AS quantity,
-            GROUP_CONCAT(ld.leave_date) AS dates,
+            lr.quantity,
+            CASE 
+                WHEN lr.type_of_leave IN ('Maternity', 'Paternity', 'Marital') 
+                THEN CONCAT(lr.start_date, ' >> ', lr.end_date)
+                ELSE GROUP_CONCAT(ld.leave_date)
+            END AS dates, -- Conditionally formatted dates field
             GROUP_CONCAT(
                 CASE 
                     WHEN lr.type_of_leave = 'Personal Time Off' THEN CONCAT(DATE_FORMAT(ld.start_time, '%H:%i'), ' >> ',DATE_FORMAT(ld.end_time, '%H:%i'))
@@ -865,7 +1742,7 @@ app.patch('/leave-requests/:id/approve', authenticateToken, (req, res) => {
                     res.status(500).send(err);
                 } else {
                     // Only update days if the leave type is not 'Sick Leave With Note' or 'Sick Leave Without Note'
-                    if (type_of_leave !== 'Sick Leave With Note' && type_of_leave !== 'Sick Leave Without Note' && type_of_leave !== 'Personal Time Off') {
+                    if (!['Sick Leave With Note', 'Sick Leave Without Note', 'Personal Time Off', 'Condolences', 'Marital', 'Paternity', 'Maternity'].includes(type_of_leave)) {
                         const updateDaysQuery = `
                             UPDATE employee 
                             SET days = days - ? 
@@ -980,7 +1857,7 @@ SELECT
             FROM leave_requests lr
             JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
             WHERE lr.employee_id = ?
-              AND lr.request_status != 'Cancelled'
+              AND (lr.request_status != 'Cancelled' && lr.request_status != 'Rejected')
         ) main
     `;
 
@@ -1123,7 +2000,6 @@ app.patch('/leave-requests/:id/edit', authenticateToken, (req, res) => {
         }
     });
 });
-
 app.get('/department-leaves', authenticateToken, (req, res) => {
     const userId = req.user.id;
 
@@ -1139,78 +2015,43 @@ SELECT
 FROM leave_requests lr
 JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
 JOIN employee e ON lr.employee_id = e.id
-JOIN department d ON e.department_id = d.id
-WHERE d.manager_id = ? 
+WHERE e.manager_id = ? 
 AND lr.request_status IN ('Approved', 'Pending Manager')
-
     `;
-    db.query(query, [userId, userId], (err, result) => {
+    db.query(query, [userId], (err, result) => {
         if (err) res.status(500).send(err);
         else res.send(result);
     });
 });
 
 
-// Function to add birthday leave
-function addBirthdayLeave() {
-    const today = moment().format('MM-DD');
-    
-    const query = `
-        SELECT id, first_name, last_name 
-        FROM employee 
-        WHERE DATE_FORMAT(birthday, '%m-%d') = ?
-    `;
 
-    db.query(query, [today], (err, results) => {
-        if (err) {
-            console.error('Error fetching employees with birthdays:', err);
-            return;
-        }
+// app.get('/department-leaves', authenticateToken, (req, res) => {
+//     const userId = req.user.id;
 
-        results.forEach(employee => {
-            const updateQuery = `UPDATE employee SET days = days + 1 WHERE id = ?`;
-            db.query(updateQuery, [employee.id], (updateErr, updateResult) => {
-                if (updateErr) {
-                    console.error(`Error updating leave days for employee ID ${employee.id}:`, updateErr);
-                    return;
-                }
+//     const query = `
+// SELECT 
+//     e.id AS employee_id,
+//     CONCAT(e.first_name, ' ', e.last_name) AS employee_name,
+//     lr.type_of_leave,
+//     lr.request_status,
+//     ld.leave_date,
+//     ld.duration,
+//     ld.time
+// FROM leave_requests lr
+// JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
+// JOIN employee e ON lr.employee_id = e.id
+// JOIN department d ON e.department_id = d.id
+// WHERE d.manager_id = ? 
+// AND lr.request_status IN ('Approved', 'Pending Manager')
 
-                // Insert leave request for the birthday leave
-                const leaveRequestQuery = `
-                    INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
-                    VALUES (?, 'Birthday', 'Add', 1, NOW(), NOW(), NOW())
-                `;
-                db.query(leaveRequestQuery, [employee.id], (leaveErr, leaveResult) => {
-                    if (leaveErr) {
-                        console.error('Error inserting leave request for birthday leave:', leaveErr);
-                        return;
-                    }
+//     `;
+//     db.query(query, [userId, userId], (err, result) => {
+//         if (err) res.status(500).send(err);
+//         else res.send(result);
+//     });
+// });
 
-                    const dateQuery = `
-                        INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, time)
-                        VALUES (?, NOW(), ?, ?)
-                    `;
-                    db.query(dateQuery, [leaveResult.insertId, 1, null]);
-
-                    const logQuery = `
-                        INSERT INTO logs (hr_user, action, details, timestamp)
-                        VALUES (?, 'Birthday', 'Added 1 day for birthday to ${employee.first_name} ${employee.last_name}', NOW())
-                    `;
-                    db.query(logQuery, [employee.id], (logErr, logResult) => {
-                        if (logErr) {
-                            console.error('Error logging birthday leave addition:', logErr);
-                        }
-                    });
-                });
-            });
-        });
-    });
-}
-
-// Schedule the addBirthdayLeave function to run daily at midnight
-cron.schedule('0 0 * * *', () => {
-    addBirthdayLeave();
-});
 app.post('/holiday', hrAuthenticateToken, async (req, res) => {
     const { startDate, endDate, description } = req.body;
     const hrUserId = getIdFromToken(req); // Get HR user ID from token
@@ -1341,3 +2182,55 @@ app.get('/remaining-timeoff/:employeeId', authenticateToken, (req, res) => {
     });
 });
 
+cron.schedule('0 0 30 6 *', () => {
+    console.log('Running June 30th leave deduction check...');
+
+    // Fetch all employees
+    const getEmployeesQuery = `
+        SELECT id, start_date, days
+        FROM employee
+    `;
+
+    db.query(getEmployeesQuery, (err, employees) => {
+        if (err) {
+            console.error('Error fetching employees:', err);
+            return;
+        }
+
+        employees.forEach(employee => {
+            const { id, start_date, days } = employee;
+            const startMoment = moment(start_date);
+            const currentMoment = moment();
+            const yearsOfService = currentMoment.diff(startMoment, 'years');
+
+            // Calculate leave days per year based on service years and manager status
+            let leaveDaysPerYear = 15;
+            isManager(id).then(isManagerStatus => {
+                if (isManagerStatus) {
+                    leaveDaysPerYear = 21;
+                } else if (yearsOfService >= 15) {
+                    leaveDaysPerYear = 21;
+                } else if (yearsOfService >= 5) {
+                    leaveDaysPerYear = 18;
+                }
+
+                const daysToBeConsumed = days - (leaveDaysPerYear * 2);
+                if (daysToBeConsumed > 0) {
+                    const updatedDays = days - daysToBeConsumed;
+
+                    // Update the employee's days
+                    const updateDaysQuery = `UPDATE employee SET days = ? WHERE id = ?`;
+                    db.query(updateDaysQuery, [updatedDays, id], (updateErr) => {
+                        if (updateErr) {
+                            console.error(`Error updating days for employee ID ${id}:`, updateErr);
+                        } else {
+                            console.log(`Updated days for employee ID ${id}: ${updatedDays}`);
+                        }
+                    });
+                }
+            }).catch(err => {
+                console.error('Error checking if employee is a manager:', err);
+            });
+        });
+    });
+});
