@@ -172,7 +172,7 @@ const isManager = (employeeId) => {
     return new Promise((resolve, reject) => {
         const checkManagerQuery = `
             SELECT COUNT(*) AS isManager
-            FROM department
+            FROM employee
             WHERE manager_id = ?
         `;
         db.query(checkManagerQuery, [employeeId], (err, results) => {
@@ -639,11 +639,8 @@ app.get('/employee', hrAuthenticateToken, (req, res) => {
                 e.start_date, 
                 e.end_date, 
                 l.location_name,
-                CASE 
-                    WHEN l.location_name = 'Zalka' AND e.id != d.supervisor_id AND e.id != d.manager_id THEN CONCAT(sup.first_name, ' ', sup.last_name)
-                    WHEN l.location_name != 'Zalka' AND e.id != l.branch_manager_id THEN CONCAT(bm.first_name, ' ', bm.last_name)
-                    ELSE NULL
-                END AS first_approver_name,
+                e.first_approver_id,
+                CONCAT(fe.first_name, ' ', fe.last_name) AS first_approver_full_name,
                 COALESCE(SUM(CASE WHEN (YEAR(ld.leave_date) = YEAR(CURDATE()) AND (lr.request_status IN('Approved', 'HR Remove')  AND lr.type_of_leave = 'Annual Paid Leave')) THEN ld.duration ELSE 0 END), 0) AS paid_leaves_taken,
                 COALESCE(SUM(CASE WHEN (YEAR(ld.leave_date) = YEAR(CURDATE()) AND (lr.request_status IN('Approved', 'HR Remove')  AND lr.type_of_leave = 'Sick Leave With Medical Report')) THEN ld.duration ELSE 0 END), 0) AS sick_leaves_with_medical_report_taken,
                 COALESCE(SUM(CASE WHEN (YEAR(ld.leave_date) = YEAR(CURDATE()) AND (lr.request_status IN('Approved', 'HR Remove')  AND lr.type_of_leave = 'Sick Leave Allowed')) THEN ld.duration ELSE 0 END), 0) AS sick_leaves_allowed_taken,
@@ -655,9 +652,8 @@ app.get('/employee', hrAuthenticateToken, (req, res) => {
                 FROM employee e
                 LEFT JOIN department d ON e.department_id = d.id
                 LEFT JOIN employee me ON e.manager_id = me.id
+                LEFT JOIN employee fe ON e.first_approver_id = fe.id
                 LEFT JOIN location l ON e.location_id = l.id
-                LEFT JOIN employee sup ON d.supervisor_id = sup.id
-                LEFT JOIN employee bm ON l.branch_manager_id = bm.id
                 LEFT JOIN leave_requests lr ON e.id = lr.employee_id
                 LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
                 GROUP BY e.id
@@ -712,30 +708,17 @@ app.get('/employee/:id',async  (req, res) => {
             e.start_date, 
             e.end_date,
             EXISTS(
-                SELECT 1 FROM department WHERE manager_id = e.id
+                SELECT COUNT(*) FROM employee WHERE manager_id = e.id HAVING COUNT(*) > 0
             ) AS is_manager,
             l.location_name,
-            CASE 
-                WHEN (e.id = s.id OR e.id = bm.id OR (SELECT 1 FROM department WHERE manager_id = e.id) = 1) THEN NULL
-                WHEN l.location_name = 'Zalka' THEN s.id
-                ELSE bm.id
-            END AS first_approver_id,
-            CASE 
-                WHEN (e.id = s.id OR e.id = bm.id OR (SELECT 1 FROM department WHERE manager_id = e.id)) THEN NULL
-                WHEN l.location_name = 'Zalka' THEN s.first_name
-                ELSE bm.first_name
-            END AS first_approver_first_name,
-            CASE 
-                WHEN (e.id = s.id OR e.id = bm.id OR (SELECT 1 FROM department WHERE manager_id = e.id)) THEN NULL
-                WHEN l.location_name = 'Zalka' THEN s.last_name
-                ELSE bm.last_name
-            END AS first_approver_last_name
+            e.first_approver_id, 
+            fe.first_name AS "first_approver_first_name", 
+            fe.last_name AS "first_approver_last_name" 
         FROM employee e
         LEFT JOIN department d ON e.department_id = d.id
         LEFT JOIN employee me ON e.manager_id = me.id
+        LEFT JOIN employee fe ON e.first_approver_id = fe.id
         LEFT JOIN location l ON e.location_id = l.id
-        LEFT JOIN employee s ON d.supervisor_id = s.id
-		LEFT JOIN employee bm ON l.branch_manager_id = bm.id
         WHERE e.id = ?;
     `;
     try{
@@ -753,18 +736,19 @@ app.get('/employee/:id',async  (req, res) => {
     
 });
 app.post('/employee', hrAuthenticateToken, async (req, res) => {
-    const { id, firstName, middleName, lastName, email, departmentId, managerId, birthday, startDate, endDate, locationId } = req.body;
+    const { id, firstName, middleName, lastName, email, departmentId, managerId, birthday, startDate, endDate, locationId, firstApproverId } = req.body;
     const hrUserId = getIdFromToken(req); // Get HR user ID from token
 
     // Check if managerId is provided, if not, set it to NULL
     const managerIdValue = managerId ? managerId : null;
+    const firstApproverIdValue = firstApproverId ? firstApproverId : null;
 
             const query = `
         INSERT INTO employee 
-        (id, first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date, location_id) 
-        VALUES (?,?,?,?,?,?,?,?,?,?,?);
+        (id, first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date, location_id, first_approver_id) 
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?);
     `;
-    db.query(query, [id, firstName, middleName, lastName, email, departmentId, managerIdValue, birthday, startDate, endDate, locationId], (err, result) => {
+    db.query(query, [id, firstName, middleName, lastName, email, departmentId, managerIdValue, birthday, startDate, endDate, locationId, firstApproverIdValue], (err, result) => {
         if (err) {
             res.send(err);
         } else {
@@ -783,7 +767,7 @@ app.post('/employee', hrAuthenticateToken, async (req, res) => {
                         console.error('Error updating prorated leave days:', err);
                         res.status(500).send(err);
                     } else {
-                        const details = `Created new employee: ${firstName} ${lastName} (ID: ${newEmployeeId}), Department: ${departmentId}, Manager: ${managerIdValue}, Start Date: ${startDate}, End Date: ${endDate}`;
+                        const details = `Created new employee: ${firstName} ${lastName} (ID: ${newEmployeeId}), Department: ${departmentId}, Manager: ${managerIdValue}, First Approver: ${firstApproverIdValue}, Start Date: ${startDate}, End Date: ${endDate}`;
                         addLog(hrUserId, 'Create Employee', details);
                         res.send({ id: newEmployeeId });
                     }
@@ -806,14 +790,14 @@ app.patch('/employee/:id', hrAuthenticateToken, (req, res) => {
         } else {
             const originalEmployee = result[0];
             const updatedEmployee = { ...originalEmployee, ...camelToSnake(req.body) };
-            const { first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date, location_id, days } = updatedEmployee;
+            const { first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date, location_id, days, first_approver_id } = updatedEmployee;
 
             const query = `
                 UPDATE employee
-                SET first_name = ?, middle_name = ?, last_name = ?, email = ?, department_id = ?, manager_id = ?, days = ?, birthday = ?, start_date = ?, end_date = ?, location_id = ? 
+                SET first_name = ?, middle_name = ?, last_name = ?, email = ?, department_id = ?, manager_id = ?, days = ?, birthday = ?, start_date = ?, end_date = ?, location_id = ?, first_approver_id = ? 
                 WHERE id = ?;
             `;
-            db.query(query, [first_name, middle_name, last_name, email, department_id, manager_id, days, birthday, start_date, end_date, location_id, id], (err, result) => {
+            db.query(query, [first_name, middle_name, last_name, email, department_id, manager_id, days, birthday, start_date, end_date, location_id, first_approver_id, id], (err, result) => {
                 if (err) {
                     res.send(err);
                 } else {
@@ -842,102 +826,30 @@ app.delete('/employee/:id', async (req, res) => {
 });
 app.patch('/departments/:id', hrAuthenticateToken, (req, res) => {
     const departmentId = req.params.id;
-    const { name, manager_id, supervisor_id } = req.body;
+    const { name} = req.body;
     const hrUserId = getIdFromToken(req); // Get HR user ID from the token
-    const promotionDate = moment().format('YYYY-MM-DD'); // Current date
 
-    // Step 1: Fetch the current manager_id for the department
-    const getCurrentManagerQuery = `
-        SELECT manager_id
-        FROM department
-        WHERE id = ?;
-    `;
+    if(!name){
+        return res.status(400).send({error: 'Department name required'})
+    }
 
-    db.query(getCurrentManagerQuery, [departmentId], (err, result) => {
-        if (err) {
-            console.error('Error fetching current manager ID:', err);
-            return res.status(500).send(err);
-        }
-
-        if (!result || result.length === 0) {
-            console.error('Department not found');
-            return res.status(404).send({ error: 'Department not found' });
-        }
-
-        const currentManagerId = result[0].manager_id;
-
-        // Check if the manager_id has been updated
-        const managerUpdated = manager_id !== undefined && manager_id !== null && manager_id !== currentManagerId;
-
-        // Update the department's name, supervisor_id, and branch_manager_id
         const updateDepartmentQuery = `
             UPDATE department
-            SET name = ?, supervisor_id = ?
+            SET name = ?
             WHERE id = ?;
         `;
 
-        db.query(updateDepartmentQuery, [name, supervisor_id, departmentId], (err, result) => {
+        db.query(updateDepartmentQuery, [name, departmentId], (err, result) => {
             if (err) {
                 console.error('Error updating department:', err);
                 return res.status(500).send(err);
             }
-
-                if (managerUpdated) {
-                    console.log(`Manager ID has been updated to ${manager_id}, proceeding with manager-specific updates.`);
-
-                    // Fetch the new manager's details
-                    const getNewManagerQuery = `
-                        SELECT start_date, days
-                        FROM employee
-                        WHERE id = ?;
-                    `;
-
-                    db.query(getNewManagerQuery, [manager_id], (err, result) => {
-                        if (err) {
-                            console.error('Error fetching new manager details:', err);
-                            return res.status(500).send(err);
-                        }
-
-                        if (!result || result.length === 0) {
-                            console.error('New manager not found');
-                            return res.status(404).send({ error: 'New manager not found' });
-                        }
-
-                        const { start_date, days } = result[0];
-
-                        // Update the department's manager_id
-                        const updateDepartmentWithManagerQuery = `
-                            UPDATE department
-                            SET manager_id = ?
-                            WHERE id = ?;
-                        `;
-
-                        db.query(updateDepartmentWithManagerQuery, [manager_id, departmentId], (err, result) => {
-                            if (err) {
-                                console.error('Error updating department with new manager ID:', err);
-                                return res.status(500).send(err);
-                            }
-
-                            // Set leave days on promotion (if applicable)
-                            setLeaveDaysOnPromotion(manager_id, promotionDate)
-                                .then(() => {
-                                    console.log(`Leave days updated successfully for new manager ID: ${manager_id}`);
-                                    addLog(hrUserId, 'Promote Employee', `Promoted employee ID: ${manager_id} with updated leave days.`);
-                                    res.send({ message: 'Department, manager, supervisor, branch manager, and first approval ID updated successfully' });
-                                })
-                                .catch(err => {
-                                    console.error('Error updating leave days:', err);
-                                    res.status(500).send(err);
-                                });
-                        });
-                    });
-                } else {
-                    // Log the update
-                    addLog(hrUserId, 'Update Department', `Updated department ID: ${departmentId}, set new first approval ID based on location.`);
-                    res.send({ message: 'Department and first approval ID updated successfully' });
-                }
+            if(result.affectedRows === 0){
+                return res.status(404).send({error: 'Department not found'})
+            }
+            addLog(hrUserId, 'Update Department', `Updated department ID: ${departmentId}, changed name to: ${name}`);
+            res.send({ message: 'Department updated successfully' });
         });
-    });
 });
 
 // Function to add birthday leave
@@ -1047,17 +959,9 @@ app.post('/login', async (req, res) => {
                     // Check if the user is a first approver
                     const isFirstApproverQuery = `
                             SELECT COUNT(*) AS is_first_approver 
-                            FROM (
-                                SELECT id 
-                                FROM department 
-                                WHERE supervisor_id = ? AND id = ?
-                                UNION
-                                SELECT id 
-                                FROM location 
-                                WHERE branch_manager_id = ? AND id = ?
-                            ) AS first_approver_check
+                            FROM employee WHERE first_approver_id = ?
                     `;
-                    db.query(isFirstApproverQuery, [user.id, user.department_id, user.id, user.location_id], (err, firstApproverResult) => {
+                    db.query(isFirstApproverQuery, [user.id], (err, firstApproverResult) => {
                         if (err) {
                             res.status(500).send(err);
                         } else {
@@ -1069,7 +973,7 @@ app.post('/login', async (req, res) => {
                                     db.query('UPDATE employee SET password = ? WHERE id = ?', [hashedPassword, user.id], (err, result) => {
                                         if (err) res.send(err);
                                         const token = jwt.sign(
-                                            { id: user.id, is_hr: user.department_id == 1, is_manager: isManager, is_first_approver: isFirstApprover },
+                                            { id: user.id, is_hr: user.department_id == 1, is_manager: isManager, is_first_approver: isFirstApprover},
                                             jwt_secret,
                                             { expiresIn: '12h' }
                                         );
@@ -1118,8 +1022,7 @@ app.post('/login', async (req, res) => {
 
 app.get('/departments', (req, res) => {
     var query = `
-        SELECT d.id, d.name, d.manager_id, CONCAT(me.first_name, ' ', me.last_name) AS manager_full_name, d.supervisor_id, CONCAT(se.first_name, ' ', se.last_name) AS supervisor_full_name
-        FROM department d LEFT JOIN employee me ON d.manager_id = me.id LEFT JOIN employee se ON d.supervisor_id = se.id
+        SELECT id, name FROM department
     `;
     db.query(query, (err, result) => {
         if (err) res.send(err);
@@ -1128,14 +1031,14 @@ app.get('/departments', (req, res) => {
 
 
 app.post('/departments', hrAuthenticateToken, async (req, res) => {
-    const { name, manager_id, supervisor_id } = req.body;
+    const { name} = req.body;
     const hrUserId = getIdFromToken(req); // Get HR user ID from token
 
     const query = `
-        INSERT INTO department (name, manager_id, supervisor_id)
-        VALUES (?, ?, ?);
+        INSERT INTO department (name)
+        VALUES (?);
     `;
-    db.query(query, [name, manager_id, supervisor_id], (err, result) => {
+    db.query(query, [name], (err, result) => {
         if (err) {
             res.send(err);
         } else {
@@ -1144,7 +1047,7 @@ app.post('/departments', hrAuthenticateToken, async (req, res) => {
                 if (err) {
                     res.send(err);
                 } else {
-                    addLog(hrUserId, 'Add Department', `Added department: ${name} with manager ID: ${manager_id}`);
+                    addLog(hrUserId, 'Add Department', `Added department: ${name}`);
                     res.send(newDeptResult[0]);
                 }
             });
@@ -1152,58 +1055,6 @@ app.post('/departments', hrAuthenticateToken, async (req, res) => {
     });
 });
 
-
-app.get('/managers/:department', (req, res) => {
-    const token = req.headers['authorization'];
-    const user_id = jwt.decode(token.split(' ')[1]).id;
-    const department = req.params.department;
-
-    var query = `
-        SELECT e.id,e.first_name,e.last_name
-        FROM employee e
-        WHERE department_id = ?
-        AND id != ?
-    `;
-    db.query(query, [department, user_id], (err, result) => {
-        if (err) res.send(err);
-        else res.send(result);
-    })
-});
-
-app.get('/manager/:departmentId', authenticateToken, async (req, res) => {
-    const { departmentId } = req.params;
-    try {
-        const query = `
-            SELECT e.id, e.first_name, e.last_name FROM employee e
-            LEFT JOIN department d
-            ON e.id = d.manager_id
-            WHERE d.id = ?
-        `;
-        db.query(query, [departmentId], (err, result) => {
-            if (err) res.send(err);
-            else res.send(result[0]);
-        })
-    } catch (error) {
-        console.error('Error fetching managers:', error);  // Log detailed error
-        res.status(500).json({ message: 'Internal Server Error', error: error.message });  // Return detailed error
-    }
-});
-
-app.get('/managers-of-managers', authenticateToken, async (req, res) => {
-    try {
-        const query = `
-            SELECT e.id, e.first_name, e.last_name FROM employee e
-            WHERE e.department_id = 13
-        `;
-        db.query(query, (err, result) => {
-            if (err) res.send(err);
-            else res.send(result);
-        })
-    } catch (error) {
-        console.error('Error fetching managers of managers:', error);  // Log detailed error
-        res.status(500).json({ message: 'Internal Server Error', error: error.message });  // Return detailed error
-    }
-});
 app.post('/leave-requests', authenticateToken, upload.single('attachment'), (req, res) => {
     const { employeeId, typeOfLeave, quantity, leaveDetails } = req.body;
     const attachment = req.file ? req.file.filename : null;
@@ -1289,16 +1140,8 @@ app.post('/leave-requests', authenticateToken, upload.single('attachment'), (req
 
         function determineInitialStatusAndInsert() {
             const firstApprovalQuery = `
-                SELECT 
-                    CASE 
-                        WHEN l.location_name = 'Zalka' AND e.id != d.supervisor_id AND e.id != d.manager_id THEN d.supervisor_id
-                        WHEN l.location_name != 'Zalka' AND e.id != l.branch_manager_id THEN l.branch_manager_id
-                        ELSE NULL
-                    END AS first_approver_id
-                FROM employee e
-                LEFT JOIN department d ON e.department_id = d.id
-                LEFT JOIN location l ON e.location_id = l.id
-                WHERE e.id = ?;
+                SELECT first_approver_id
+                FROM employee WHERE id = ?;
             `;
 
             db.query(firstApprovalQuery, [employeeId], (err, results) => {
@@ -1619,18 +1462,13 @@ app.get('/first-approval-requests', authenticateToken, (req, res) => {
                     FROM leave_requests lr
                     JOIN employee e ON lr.employee_id = e.id
                     LEFT JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
-                    LEFT JOIN department d ON e.department_id = d.id
-                    LEFT JOIN location l ON e.location_id = l.id
                     WHERE lr.request_status = 'Pending First Approval'
-                    AND (
-                        d.supervisor_id = ? 
-                        OR l.branch_manager_id = ?
-                    )
+                    AND ( first_approver_id = ? )
                     GROUP BY lr.id
                     ORDER BY lastModified DESC;
 
     `;
-    db.query(query, [userId, userId], (err, result) => {
+    db.query(query, [userId], (err, result) => {
         if (err) res.send(err);
         else res.send(result);
     });
@@ -1650,15 +1488,10 @@ app.get('/first-approver-leaves', authenticateToken, (req, res) => {
                     FROM leave_requests lr
                     JOIN leave_request_dates ld ON lr.id = ld.leave_request_id
                     JOIN employee e ON lr.employee_id = e.id
-                    LEFT JOIN department d ON e.department_id = d.id
-                    LEFT JOIN location l ON e.location_id = l.id
                     WHERE lr.request_status IN ('Approved', 'Pending First Approval', 'Pending Manager')
-                    AND (
-                        d.supervisor_id = ? 
-                        OR l.branch_manager_id = ?
-                    );
+                    AND first_approver_id = ?;
     `;
-    db.query(query, [userId, userId], (err, result) => {
+    db.query(query, [userId], (err, result) => {
         if (err) res.status(500).send(err);
         else res.send(result);
     });
@@ -1753,10 +1586,10 @@ app.get('/previous-unpaid-leave-days/:employeeId', authenticateToken, (req, res)
     const query = `
         SELECT SUM(quantity) as total
         FROM leave_requests
-        WHERE employee_id = ? AND YEAR(leave_request_dates.leave_date) = ? AND type_of_leave = 'Unpaid Leave' AND request_status != 'Cancelled'
+        WHERE employee_id = ? AND YEAR(leave_requests.start_date) = ? AND YEAR(leave_requests.end_date) = ? AND type_of_leave = 'Unpaid Leave' AND request_status != 'Cancelled'
     `;
 
-    db.query(query, [employeeId, currentYear], (err, results) => {
+    db.query(query, [employeeId, currentYear, currentYear], (err, results) => {
         if (err) {
             console.error('Database query error:', err);
             return res.status(500).send(err);
@@ -2721,10 +2554,10 @@ app.get('/previous-sick-leave-days/:employeeId', authenticateToken, (req, res) =
     const query = `
         SELECT SUM(quantity) as total
         FROM leave_requests
-        WHERE employee_id = ? AND YEAR(leave_request_dates.leave_date) = ? AND type_of_leave = 'Sick Leave Allowed' AND request_status != 'Cancelled'
+        WHERE employee_id = ? AND YEAR(leave_requests.start_date) = ? AND YEAR(leave_requests.end_date) = ? AND type_of_leave = 'Sick Leave Allowed' AND request_status != 'Cancelled'
     `;
 
-    db.query(query, [employeeId, currentYear], (err, results) => {
+    db.query(query, [employeeId, currentYear, currentYear], (err, results) => {
         if (err) {
             console.error('Database query error:', err);
             return res.status(500).send(err);
@@ -3117,8 +2950,7 @@ app.get('/remaining-timeoff/:employeeId', authenticateToken, (req, res) => {
 
 app.get('/location', hrAuthenticateToken, (req, res) => {
     const dbQuery = `
-        SELECT l.id, l.location_name, l.branch_manager_id, CONCAT(e.first_name, ' ', e.last_name) AS branch_manager_full_name
-        FROM location l LEFT JOIN employee e ON l.branch_manager_id = e.id;
+        SELECT id, location_name FROM location;
     `;
 
     db.query(dbQuery, (err, results) => {
@@ -3128,34 +2960,39 @@ app.get('/location', hrAuthenticateToken, (req, res) => {
 });
 
 app.post('/location', hrAuthenticateToken, (req, res) => {
-    const { location_name, branch_manager_id } = req.body;
-    console.log("jnjdnckndwocnwdon: "+location_name+"    "+branch_manager_id)
+    const { location_name} = req.body;
+    const hrUserId = getIdFromToken(req); 
     const dbQuery = `
         INSERT INTO location
-        (location_name, branch_manager_id) VALUES (?,?);
+        (location_name) VALUES (?);
     `;
 
-    db.query(dbQuery, [location_name, branch_manager_id], (err, results) => {
+    db.query(dbQuery, [location_name], (err, result) => {
         if (err) return res.status(500).send(err);
         else{
-            res.send({
-                location_name,
-                branch_manager_id
+            const newLocationId = result.insertId;
+            db.query(`SELECT * FROM location WHERE id = ?`, [newLocationId], (err, newLocResult) => {
+                if (err) {
+                    res.send(err);
+                } else {
+                    addLog(hrUserId, 'Add Location', `Added location: ${location_name}`);
+                    res.send(newLocResult[0]);
+                }
             });
         }
     });
 });
 app.patch('/locations/:id', hrAuthenticateToken, (req, res) => {
     const locationId = req.params.id;
-    const { location_name, branch_manager_id } = req.body;
+    const { location_name} = req.body;
 
     const updateQuery = `
         UPDATE location 
-        SET location_name = ?, branch_manager_id = ? 
+        SET location_name = ?
         WHERE id = ?;
     `;
 
-    db.query(updateQuery, [location_name, branch_manager_id, locationId], (err, result) => {
+    db.query(updateQuery, [location_name, locationId], (err, result) => {
         if (err) {
             console.error('Database update error:', err);
             return res.status(500).send('An error occurred while updating the location.');
@@ -3167,8 +3004,7 @@ app.patch('/locations/:id', hrAuthenticateToken, (req, res) => {
 
         res.send({ 
             id: locationId, 
-            location_name, 
-            branch_manager_id 
+            location_name
         });
     });
 });
