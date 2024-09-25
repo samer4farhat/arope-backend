@@ -702,8 +702,7 @@ app.get('/employee/:id',async  (req, res) => {
             d.id AS "department_id", 
             d.name AS "department_name", 
             e.manager_id, 
-            me.first_name AS "manager_first_name", 
-            me.last_name AS "manager_last_name", 
+            CONCAT(me.first_name, ' ', me.last_name) AS manager_full_name,  
             e.birthday, 
             e.start_date, 
             e.end_date,
@@ -712,8 +711,7 @@ app.get('/employee/:id',async  (req, res) => {
             ) AS is_manager,
             l.location_name,
             e.first_approver_id, 
-            fe.first_name AS "first_approver_first_name", 
-            fe.last_name AS "first_approver_last_name" 
+            CONCAT(fe.first_name, ' ', fe.last_name) AS first_approver_full_name
         FROM employee e
         LEFT JOIN department d ON e.department_id = d.id
         LEFT JOIN employee me ON e.manager_id = me.id
@@ -790,6 +788,7 @@ app.patch('/employee/:id', hrAuthenticateToken, (req, res) => {
         } else {
             const originalEmployee = result[0];
             const updatedEmployee = { ...originalEmployee, ...camelToSnake(req.body) };
+            console.log("dcjndkcjdalkcnkd    "+updatedEmployee.first_approver_id)
             const { first_name, middle_name, last_name, email, department_id, manager_id, birthday, start_date, end_date, location_id, days, first_approver_id } = updatedEmployee;
 
             const query = `
