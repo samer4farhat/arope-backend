@@ -434,22 +434,33 @@ const adjustLeaveDaysOnServiceAnniversary = (employeeId, adjustmentDate) => {
 
             console.log(`Rounded New Leave Days: ${roundedNewLeaveDays}`);
 
+            const logQuery=`
+                INSERT INTO leave_balance_log (employee_id, balance_before, balance_after, log_date) VALUES (?, ?, ?, ?)
+            `
+
             const updateQuery = `UPDATE employee SET days = ? WHERE id = ?`;
-            db.query(updateQuery, [roundedNewLeaveDays, employeeId], (err, result) => {
-                if (err) {
-                    console.error('Error updating leave days:', err);
-                    return reject(err);
+
+            db.query(logQuery, [employeeId, currentDays, roundedNewLeaveDays, new Date()], (logErr)=>{
+                if(logErr){
+                    console.error(`Error logging balance for Employee ID ${employeeId}:`, logErr)
+                    return reject(logErr)
                 }
-                const employeeName = `${firstName} ${lastName}`
-
-                const subject = 'Anniversary Update'
-                const text = `Dear HR,\n\nThe days of ${employeeName} with id ${employeeId} have been updated from ${currentDays} to ${roundedNewLeaveDays}.\n\nBest regards`
-                const link = `http://sqldb-srv:3000/login`
-                sendEmailNotifications('leaverequest@arope.com',subject, text, link)
-                console.log(`Leave days updated for employee ID: ${employeeId}`);
-
-                resolve(result);
-            });
+                db.query(updateQuery, [roundedNewLeaveDays, employeeId], (err, result) => {
+                    if (err) {
+                        console.error('Error updating leave days:', err);
+                        return reject(err);
+                    }
+                    const employeeName = `${firstName} ${lastName}`
+    
+                    const subject = 'Anniversary Update'
+                    const text = `Dear HR,\n\nThe days of ${employeeName} with id ${employeeId} have been updated from ${currentDays} to ${roundedNewLeaveDays}.\n\nBest regards`
+                    const link = `http://sqldb-srv:3000/login`
+                    sendEmailNotifications('leaverequest@arope.com',subject, text, link)
+                    console.log(`Leave days updated for employee ID: ${employeeId}`);
+    
+                    resolve(result);
+                });
+            })
         });
     });
 };
@@ -511,7 +522,7 @@ const updateLeaveDaysOnJan1 = () => {
         const currentYear = moment().year();
         const getEmployeesQuery = `
             SELECT id, start_date, end_date 
-            FROM employee WHERE id=743
+            FROM employee
         `;
 
         db.query(getEmployeesQuery, (err, employees) => {
@@ -536,8 +547,25 @@ const updateLeaveDaysOnJan1 = () => {
                         leaveDays = calculateLeaveDays(start_date, null, isManager, yearsOfService, 0, 12);
                     }
                     console.log(`Calculated Leave Days for Employee ID ${id}: ${leaveDays}`);
+                    const newBalance = currentDays +leaveDays
+                    const logQuery=`
+                        INSERT INTO leave_balance_log (employee_id, balance_before, balance_after, log_date) VALUES (?,?,?,?)
+                    `
                     const updateQuery = `UPDATE employee SET days = days + ? WHERE id = ?`;
-                    return db.query(updateQuery, [leaveDays, id]);
+                    return db.query(logQuery, [id, currentDays, newBalance, new Date()]), (logErr) => {
+                        if(logErr){
+                            console.err(`Error logging balance for employee with id ${id}:`, logErr)
+                            throw logErr
+                        }
+                        db.query(updateQuery, [leaveDays, id], (updateErr) =>{
+                            if(updateErr){
+                                console.err(`Error updating balance for employee with id ${id}:`, updateErr)
+                                throw updateErr
+                            }
+                            console.log(`Leave balance updated for employee with id ${id}`)
+                        });
+                    }
+                
                 });
             });
 
@@ -812,6 +840,82 @@ app.patch('/employee/:id', hrAuthenticateToken, (req, res) => {
         }
     });
 });
+
+app.patch('/employees/update-approvers', hrAuthenticateToken, (req, res) => {
+    const hrUserId = getIdFromToken(req); // Get HR user ID from token
+    const { oldManagerId, newManagerId, oldFirstApproverId, newFirstApproverId } = req.body;
+
+    // Log request data for debugging
+    console.log("Updating Approvers Request Data:", { oldManagerId, newManagerId, oldFirstApproverId, newFirstApproverId });
+
+    let changesLog = [];
+    let errors = [];
+
+    // Update manager_id if both oldManagerId and newManagerId are provided
+    if (oldManagerId && newManagerId) {
+        console.log(`Updating manager_id from ${oldManagerId} to ${newManagerId}`);
+        const updateManagerQuery = `UPDATE employee SET manager_id = ? WHERE manager_id = ?`;
+
+        db.query(updateManagerQuery, [newManagerId, oldManagerId], (err, result) => {
+            if (err) {
+                console.error("Error updating manager:", err);
+                errors.push(`Error updating manager: ${err.message}`);
+            } else {
+                console.log(`Manager Update Result: ${JSON.stringify(result)}`);
+                if (result.affectedRows > 0) {
+                    changesLog.push(`Updated manager_id: ${oldManagerId} => ${newManagerId}`);
+                }
+            }
+
+            // Check for next update only after manager update completes
+            updateFirstApprover();
+        });
+    } else {
+        // If no manager update is needed, proceed to first approver update
+        updateFirstApprover();
+    }
+
+    // Function to update first approver
+    function updateFirstApprover() {
+        // Update first_approver_id if both oldFirstApproverId and newFirstApproverId are provided
+        if (oldFirstApproverId && newFirstApproverId) {
+            console.log(`Updating first_approver_id from ${oldFirstApproverId} to ${newFirstApproverId}`);
+            const updateFirstApproverQuery = `UPDATE employee SET first_approver_id = ? WHERE first_approver_id = ?`;
+
+            db.query(updateFirstApproverQuery, [newFirstApproverId, oldFirstApproverId], (err, result) => {
+                if (err) {
+                    console.error("Error updating first approver:", err);
+                    errors.push(`Error updating first approver: ${err.message}`);
+                } else {
+                    console.log(`First Approver Update Result: ${JSON.stringify(result)}`);
+                    if (result.affectedRows > 0) {
+                        changesLog.push(`Updated first_approver_id: ${oldFirstApproverId} => ${newFirstApproverId}`);
+                    }
+                }
+
+                // After all updates, send response and log changes
+                finalizeUpdate();
+            });
+        } else {
+            // No first approver update needed, finalize the response
+            finalizeUpdate();
+        }
+    }
+
+    // Function to send final response and log changes
+    function finalizeUpdate() {
+        if (changesLog.length > 0) {
+            const logMessage = changesLog.join(', ');
+            addLog(hrUserId, 'Update Approvers', `HR updated: ${logMessage}`);
+        }
+
+        if (errors.length > 0) {
+            res.status(400).json({ success: false, errors });
+        } else {
+            res.json({ success: true, message: 'Update successful', changes: changesLog });
+        }
+    }
+});
 app.delete('/employee/:id', async (req, res) => {
     const id = req.params.id;
     var query = `
@@ -856,7 +960,7 @@ function addBirthdayLeave() {
     const today = moment().format('MM-DD');
     
     const query = `
-        SELECT id, first_name, last_name 
+        SELECT id, first_name, last_name, days 
         FROM employee 
         WHERE DATE_FORMAT(birthday, '%m-%d') = ?
     `;
@@ -868,41 +972,52 @@ function addBirthdayLeave() {
         }
 
         results.forEach(employee => {
-            const updateQuery = `UPDATE employee SET days = days + 1 WHERE id = ?`;
-            db.query(updateQuery, [employee.id], (updateErr, updateResult) => {
-                if (updateErr) {
-                    console.error(`Error updating leave days for employee ID ${employee.id}:`, updateErr);
-                    return;
+            const {id, first_name, last_name, days: currentDays} = employee;
+            const newBalance = currentDays + 1
+            const logBalanceQuery=`
+                INSERT INTO leave_balance_log (employee_id, balance_before, balance_after, log_date) VALUES (?, ?, ?, NOW())
+            `
+            db.query(logBalanceQuery, [id, currentDays, newBalance], (logErr, logResult)=>{
+                if(logErr){
+                    console.error(`Error logging birthday balance for employee with id ${id}`, logErr)
+                    return
                 }
-
-                // Insert leave request for the birthday leave
-                const leaveRequestQuery = `
-                    INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
-                    VALUES (?, 'Birthday', 'Add', 1, NOW(), NOW(), NOW())
-                `;
-                db.query(leaveRequestQuery, [employee.id], (leaveErr, leaveResult) => {
-                    if (leaveErr) {
-                        console.error('Error inserting leave request for birthday leave:', leaveErr);
+                const updateQuery = `UPDATE employee SET days = days + 1 WHERE id = ?`;
+                db.query(updateQuery, [employee.id], (updateErr, updateResult) => {
+                    if (updateErr) {
+                        console.error(`Error updating leave days for employee ID ${employee.id}:`, updateErr);
                         return;
                     }
-
-                    const dateQuery = `
-                        INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, time)
-                        VALUES (?, NOW(), ?, ?)
+    
+                    // Insert leave request for the birthday leave
+                    const leaveRequestQuery = `
+                        INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
+                        VALUES (?, 'Birthday', 'Add', 1, NOW(), NOW(), NOW())
                     `;
-                    db.query(dateQuery, [leaveResult.insertId, 1, null]);
-
-                    const logQuery = `
-                        INSERT INTO logs (hr_user, action, details, timestamp)
-                        VALUES (?, 'Birthday', 'Added 1 day for birthday to ${employee.first_name} ${employee.last_name}', NOW())
-                    `;
-                    db.query(logQuery, [employee.id], (logErr, logResult) => {
-                        if (logErr) {
-                            console.error('Error logging birthday leave addition:', logErr);
+                    db.query(leaveRequestQuery, [employee.id], (leaveErr, leaveResult) => {
+                        if (leaveErr) {
+                            console.error('Error inserting leave request for birthday leave:', leaveErr);
+                            return;
                         }
+    
+                        const dateQuery = `
+                            INSERT INTO leave_request_dates (leave_request_id, leave_date, duration, time)
+                            VALUES (?, NOW(), ?, ?)
+                        `;
+                        db.query(dateQuery, [leaveResult.insertId, 1, null]);
+    
+                        const logQuery = `
+                            INSERT INTO logs (hr_user, action, details, timestamp)
+                            VALUES (?, 'Birthday', 'Added 1 day for birthday to ${employee.first_name} ${employee.last_name}', NOW())
+                        `;
+                        db.query(logQuery, [employee.id], (logErr, logResult) => {
+                            if (logErr) {
+                                console.error('Error logging birthday leave addition:', logErr);
+                            }
+                        });
                     });
                 });
-            });
+            })
         });
     });
 }
@@ -3060,13 +3175,78 @@ cron.schedule('0 0 30 6 *', () => {
         });
     });
 });
-app.post('/api/update-leave-days', (req, res) => {
-    updateLeaveDaysOnJan1()
-        .then(() => {
-            res.status(200).send('Leave days update triggered successfully');
-        })
-        .catch(err => {
-            console.error('Error triggering leave days update:', err);
-            res.status(500).send('An error occurred while triggering the leave days update');
+app.post('/deduct-leave', (req, res) => {
+    console.log('Manually triggered leave deduction...')
+        // Fetch all employees
+        const getEmployeesQuery = `
+        SELECT id, start_date, days
+        FROM employee
+    `;
+
+    db.query(getEmployeesQuery, (err, employees) => {
+        if (err) {
+            console.error('Error fetching employees:', err);
+            return res.status(500).json({message:`Error fetching employees`});
+        }
+
+        const promises = employees.map(employee => {
+            const { id, start_date, days:currentDays } = employee;
+            const startMoment = moment(start_date);
+            const currentMoment = moment();
+            const yearsOfService = currentMoment.diff(startMoment, 'years');
+
+            // Calculate leave days per year based on service years and manager status
+            let leaveDaysPerYear = 15;
+            isManager(id).then(isManagerStatus => {
+                if (isManagerStatus) {
+                    leaveDaysPerYear = 21;
+                } else if (yearsOfService >= 15) {
+                    leaveDaysPerYear = 21;
+                } else if (yearsOfService >= 5) {
+                    leaveDaysPerYear = 18;
+                }
+
+                const daysToBeConsumed = currentDays - (leaveDaysPerYear * 2);
+                if (daysToBeConsumed > 0) {
+                    const updatedDays = currentDays - daysToBeConsumed;
+
+                    const logBalanceQuery = `
+                        INSERT INTO leave_balance_log (employee_id, balance_before, balance_after, log_date) VALUES (?, ?, ?, NOW())
+                    `
+                    return new Promise((resolve, reject) => {
+                        db.query(logBalanceQuery, [id, currentDays, updatedDays], (logErr) => {
+                            if(logErr){
+                                console.error(`Error logging balance for employee with ID ${id}`, logErr)
+                                return reject(logErr)
+                            }
+                             
+                            const updateDaysQuery = `UPDATE employee SET days = ? WHERE id = ?`;
+                            db.query(updateDaysQuery, [updatedDays, id], (updateErr) => {
+                                if (updateErr) {
+                                    console.error(`Error updating days for employee ID ${id}:`, updateErr);
+                                    return reject(updateErr)
+                                } else {
+                                    console.log(`Updated days for employee ID ${id}: ${updatedDays}`);
+                                    resolve()
+                                }
+                            });
+                        })
+                    })
+                }else{
+                    return Promise.resolve()
+                }
+            }).catch(err => {
+                console.error('Error checking if employee is a manager:', err);
+                return Promise.reject(err)
+            });
         });
+        Promise.all(promises)
+            .then(()=>{
+                res.status(200).json({message:'Leave deduction process completed successfully.'})
+            })
+            .catch(err=>{
+                console.error("Error during leave deduction:",err)
+                res.status(500).json({message:'Error duing leave deduction process.'})
+            })
+    });
 });
