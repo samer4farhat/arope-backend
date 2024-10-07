@@ -2198,6 +2198,7 @@ app.patch('/leave-requests/:id/hr-approve', hrAuthenticateToken, (req, res) => {
     const id = req.params.id;
     const action = req.body.action; // 'approve' or 'reject'
     const approvedDays = parseFloat(req.body.approvedDays); // The number of days HR wants to approve
+    console.log("Approved days: " + approvedDays);
 
     let newStatus;
     if (action === 'approve') {
@@ -2231,11 +2232,9 @@ app.patch('/leave-requests/:id/hr-approve', hrAuthenticateToken, (req, res) => {
 
         const { employee_id, employee_email, employee_first_name, employee_last_name, manager_email, manager_first_name, manager_last_name, type_of_leave, quantity, leave_dates } = results[0];
 
-        const approvedDates = [];
-        const leaveDatesArray = leave_dates.split(',');
-
-        // If rejected, send an email to the employee notifying them
+        // Check if rejecting the request
         if (newStatus === 'Rejected') {
+            // Simply update the request status to "Rejected"
             const updateRequestQuery = `
                 UPDATE leave_requests 
                 SET request_status = ?, last_modified = NOW() 
@@ -2246,80 +2245,91 @@ app.patch('/leave-requests/:id/hr-approve', hrAuthenticateToken, (req, res) => {
                     console.error('Error rejecting leave request:', err);
                     return res.status(500).send(err);
                 }
-                const text = `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been rejected. Please contact HR for more details.\n\nBest Regards`
-                // Send rejection email to the employee
-                sendEmailNotifications(employee_email, 'Leave Request Rejected', text, link);
+                
+                const rejectionText = `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been rejected. Please contact HR for more details.\n\nBest Regards`;
+                sendEmailNotifications(employee_email, 'Leave Request Rejected', rejectionText, '');
+                
                 res.send({ message: 'Leave request rejected and email sent' });
             });
-            return;
+            return; // Exit here for "Reject" action
         }
 
-        // If approved, handle the approved days and dates
-        let totalRequested = 0.0;
 
-        for (let i = 0; i < leaveDatesArray.length; i++) {
-            if (totalRequested + parseFloat(approvedDays) <= approvedDays) {
-                totalRequested += parseFloat(approvedDays);
-                approvedDates.push(leaveDatesArray[i]);
-            } else if (totalRequested < approvedDays) {
-                const remainingDaysToApprove = approvedDays - totalRequested;
-                totalRequested += remainingDaysToApprove;
-                approvedDates.push(leaveDatesArray[i]); // Approve the last date partially
-                break;
+
+        // Check if approvedDays exceeds quantity
+        if (approvedDays > quantity) {
+            return res.status(400).send({ message: 'Approved days cannot exceed the requested quantity' });
+        }
+
+        const leaveDatesArray = leave_dates.split(',');
+        let approvedDates = [];
+        let unapprovedDates = leaveDatesArray;
+
+        // If approvedDays > 0, calculate approved and unapproved dates
+        if (approvedDays > 0) {
+            let totalApproved = 0.0;
+            for (let i = 0; i < leaveDatesArray.length; i++) {
+                if (totalApproved < approvedDays) {
+                    approvedDates.push(leaveDatesArray[i]);
+                    totalApproved += 1; 
+                }
             }
+
+            // Calculate unapproved dates
+            unapprovedDates = leaveDatesArray.filter(date => !approvedDates.includes(date));
         }
 
-        if (totalRequested < approvedDays) {
-            return res.status(400).send({ message: 'Approved days exceed requested days' });
-        }
-
+        // Update leave request as approved with the correct quantity
         const updateRequestQuery = `
             UPDATE leave_requests 
             SET request_status = ?, quantity = ?, last_modified = NOW() 
             WHERE id = ? AND request_status = 'Pending HR'
         `;
-        
+
         db.query(updateRequestQuery, [newStatus, approvedDays, id], (err, updateResult) => {
             if (err) {
                 console.error('Error approving leave request:', err);
                 return res.status(500).send(err);
             }
 
-            // Delete unapproved dates from the request
-            const deleteUnapprovedDatesQuery = `
-                DELETE FROM leave_request_dates 
-                WHERE leave_request_id = ? AND leave_date NOT IN (?)
-            `;
-            
-            db.query(deleteUnapprovedDatesQuery, [id, approvedDates], (err, deleteResult) => {
-                if (err) {
-                    console.error('Error deleting unapproved dates:', err);
-                    return res.status(500).send(err);
-                }
-
-                // Calculate unapproved days to be deducted and insert as "Forced Leave"
+            // If there are unapproved dates, handle converting them to Forced Leave
+            if (unapprovedDates.length > 0) {
+                // Calculate the quantity of unapproved days
                 const unapprovedDays = quantity - approvedDays;
 
-                // Deduct the unapproved days from the employee's balance and insert Forced Leave
-                if (unapprovedDays > 0) {
+                // Delete unapproved dates from the original leave request
+                const deleteUnapprovedDatesQuery = `
+                    DELETE FROM leave_request_dates 
+                    WHERE leave_request_id = ? AND leave_date IN (?)
+                `;
+                
+                db.query(deleteUnapprovedDatesQuery, [id, unapprovedDates], (err, deleteResult) => {
+                    if (err) {
+                        console.error('Error deleting unapproved dates:', err);
+                        return res.status(500).send(err);
+                    }
+
+                    // Deduct unapproved days from the employee's balance
                     const deductUnapprovedDaysQuery = `
                         UPDATE employee 
                         SET days = days - ? 
                         WHERE id = ?
                     `;
+
                     db.query(deductUnapprovedDaysQuery, [unapprovedDays, employee_id], (err, deductResult) => {
                         if (err) {
-                            console.error('Error deducting unapproved days:', err);
+                            console.error('Error deducting unapproved days from employee balance:', err);
                             return res.status(500).send(err);
                         }
 
-                        // Insert "Forced Leave" into leave_requests table
+                        // Insert a new "Forced Leave" request for the unapproved dates
                         const insertForcedLeaveQuery = `
                             INSERT INTO leave_requests (employee_id, type_of_leave, request_status, quantity, start_date, end_date, last_modified)
                             VALUES (?, 'Forced Leave', 'Approved', ?, ?, ?, NOW())
                         `;
-                        const startDate = approvedDates[0];
-                        const endDate = approvedDates[approvedDates.length - 1];
+                        const startDate = unapprovedDates[0];
+                        const endDate = unapprovedDates[unapprovedDates.length - 1];
+
                         db.query(insertForcedLeaveQuery, [employee_id, unapprovedDays, startDate, endDate], (err, forcedLeaveResult) => {
                             if (err) {
                                 console.error('Error inserting Forced Leave request:', err);
@@ -2328,36 +2338,33 @@ app.patch('/leave-requests/:id/hr-approve', hrAuthenticateToken, (req, res) => {
 
                             const forcedLeaveId = forcedLeaveResult.insertId;
 
-                            // Insert each unapproved date into leave_request_dates table for the Forced Leave
-                            const forcedLeaveDatesQueries = leaveDatesArray
-                                .slice(approvedDates.length) // Only unapproved dates
-                                .map(date => {
-                                    return new Promise((resolve, reject) => {
-                                        const insertForcedLeaveDateQuery = `
-                                            INSERT INTO leave_request_dates (leave_request_id, leave_date, duration)
-                                            VALUES (?, ?, 1)
-                                        `;
-                                        db.query(insertForcedLeaveDateQuery, [forcedLeaveId, date], (err, result) => {
-                                            if (err) reject(err);
-                                            else resolve(result);
-                                        });
+                            // Insert each unapproved date into leave_request_dates table for the "Forced Leave"
+                            const forcedLeaveDatesQueries = unapprovedDates.map(date => {
+                                return new Promise((resolve, reject) => {
+                                    const insertForcedLeaveDateQuery = `
+                                        INSERT INTO leave_request_dates (leave_request_id, leave_date, duration)
+                                        VALUES (?, ?, 1)
+                                    `;
+                                    db.query(insertForcedLeaveDateQuery, [forcedLeaveId, date], (err, result) => {
+                                        if (err) reject(err);
+                                        else resolve(result);
                                     });
                                 });
+                            });
 
+                            // Wait for all dates to be inserted
                             Promise.all(forcedLeaveDatesQueries)
                                 .then(() => {
                                     // Check if the request was fully or partially approved
-                                    if (totalRequested === quantity) {
+                                    if (approvedDays === quantity) {
                                         // Fully approved: send email to employee and manager
                                         sendEmailNotifications(employee_email, 'Leave Request Fully Approved', 
-                                            `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been fully approved.\n\nBest regards`, link);
-                                        // sendEmailNotifications(manager_email, 'Leave Request Approved', 
-                                        //     'An employee’s leave request has been approved.', link);
+                                            `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been fully approved.\n\nBest regards`, '');
                                     } else {
                                         // Partially approved: send email to the employee with the approved dates
                                         const approvedDatesFormatted = approvedDates.join(', ');
                                         sendEmailNotifications(employee_email, 'Leave Request Partially Approved', 
-                                            `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been partially approved for the following dates: ${approvedDatesFormatted}. Please contact HR for more details.\n\nBest regards`, link);
+                                            `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been partially approved for the following dates: ${approvedDatesFormatted}. Please contact HR for more details.\n\nBest regards`, '');
                                     }
 
                                     res.send({ message: `Leave request approved for ${approvedDays} day(s), email sent to employee` });
@@ -2368,22 +2375,14 @@ app.patch('/leave-requests/:id/hr-approve', hrAuthenticateToken, (req, res) => {
                                 });
                         });
                     });
-                } else {
-                    // Fully approved or no need to deduct
-                    if (totalRequested === quantity) {
-                        sendEmailNotifications(employee_email, 'Leave Request Fully Approved', 
-                        `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been fully approved.\n\nBest regards`, link);
-                        // sendEmailNotifications(manager_email, 'Leave Request Approved', 
-                        //     'An employee’s leave request has been approved.');
-                    } else {
-                        const approvedDatesFormatted = approvedDates.join(', ');
-                        sendEmailNotifications(employee_email, 'Leave Request Partially Approved', 
-                        `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been partially approved for the following dates: ${approvedDatesFormatted}. Please contact HR for more details.\n\nBest regards`, link)
-                    }
+                });
+            } else {
+                // If all days are approved, just send a success response
+                sendEmailNotifications(employee_email, 'Leave Request Fully Approved', 
+                    `Dear ${employee_first_name} ${employee_last_name},\n\nYour leave request has been fully approved.\n\nBest regards`, '');
 
-                    res.send({ message: `Leave request approved for ${approvedDays} day(s), email sent to employee` });
-                }
-            });
+                res.send({ message: `Leave request approved for ${approvedDays} day(s), email sent to employee` });
+            }
         });
     });
 });
